@@ -1,0 +1,45 @@
+# --- Core framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# --- HTTP clients ---
+httpx==0.28.1
+requests==2.32.3
+
+# --- Document extraction ---
+pypdf==5.1.0
+pdfplumber==0.11.5
+python-docx==1.1.2
+openpyxl==3.1.5
+python-magic-bin==0.4.14; sys_platform == 'win32'
+python-magic==0.4.27; sys_platform != 'win32'
+
+# --- LLM provider SDKs ---
+google-generativeai==0.8.3
+groq==0.13.1
+openai==1.58.1
+
+# --- Web search provider ---
+tavily-python==0.5.0
+
+# --- Job storage ---
+redis==5.2.1
+
+# --- Logging ---
+structlog==24.4.0
+
+# --- Env / config ---
+python-dotenv==1.0.1
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-mock==3.14.0
+respx==0.22.0
+
+# --- Dev tooling ---
+ruff==0.8.4
+mypy==1.14.0
