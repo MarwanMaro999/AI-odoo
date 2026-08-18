@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     groq_research_model: str = "groq/compound"
     search_provider_order: str = "tavily,groq_compound"
     registry_path: Path | None = None
+    log_level: str = "INFO"
     worker_concurrency: int = Field(default=2, ge=1, le=32)
     dev_output_dir: Path = Path("./.runtime/outputs")
     max_upload_size_mb: int = Field(default=20, ge=1, le=100)
