@@ -1,11 +1,9 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.core.exceptions import (
-    QuestionnaireConfigurationNotFound,
-    register_questionnaire_exception_handlers,
-)
-from app.core.logging import redact_private_fields
+from src.core.error_handlers import register_exception_handlers
+from src.core.exceptions import QuestionnaireConfigurationNotFound
+from src.core.logging import redact_private_fields
 
 
 def test_log_processor_redacts_private_values() -> None:
@@ -25,7 +23,7 @@ def test_log_processor_redacts_private_values() -> None:
 
 def test_questionnaire_error_does_not_expose_private_message() -> None:
     app = FastAPI()
-    register_questionnaire_exception_handlers(app)
+    register_exception_handlers(app)
 
     @app.get("/test-error")
     async def test_error() -> None:
