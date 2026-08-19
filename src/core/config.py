@@ -13,14 +13,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    gemini_api_key: SecretStr | None = Field(default=None, repr=False)
-    gemini_model: str = "gemini-3.6-flash"
     groq_api_key: SecretStr | None = Field(default=None, repr=False)
     groq_model: str = "openai/gpt-oss-20b"
-    llm_provider_order: str = "gemini,groq"
-    tavily_api_key: SecretStr | None = Field(default=None, repr=False)
     groq_research_model: str = "groq/compound"
-    search_provider_order: str = "tavily,groq_compound"
     registry_path: Path | None = None
     log_level: str = "INFO"
     worker_concurrency: int = Field(default=2, ge=1, le=32)

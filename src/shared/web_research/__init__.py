@@ -1,1 +1,1 @@
-
+"""Public web-research adapters."""

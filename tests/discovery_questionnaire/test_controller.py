@@ -107,3 +107,14 @@ def test_controller_returns_safe_public_configuration(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json()["identifier"] == "gen-discovery-questions"
     assert "instruction" not in response.json()
+
+
+def test_demo_page_is_available(tmp_path: Path) -> None:
+    _write_questionnaire_configuration(tmp_path)
+    client = _create_client(tmp_path)
+
+    response = client.get("/demo")
+
+    assert response.status_code == 200
+    assert "Datum Engine" in response.text
+    assert "Generate Arabic + English questionnaire" in response.text

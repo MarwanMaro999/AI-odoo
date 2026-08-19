@@ -1,1 +1,1 @@
-
+"""Shared LLM adapters."""

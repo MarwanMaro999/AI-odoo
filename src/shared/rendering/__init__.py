@@ -1,1 +1,1 @@
-
+"""Output rendering adapters."""

@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from src.core.exceptions import QuestionnaireRequestConflict, QuestionnaireRunNotFound
 from src.discovery_questionnaire.schemas.request import StartQuestionnaireRequest
 from src.discovery_questionnaire.schemas.response import (
+    QuestionnaireOutput,
     QuestionnaireRunState,
     QuestionnaireStatusResponse,
 )
@@ -26,6 +27,11 @@ class StoredQuestionnaireRun:
     questionnaire_version: str
     state: QuestionnaireRunState
     submitted_at: datetime
+    request: StartQuestionnaireRequest
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    outputs: list[QuestionnaireOutput] | None = None
+    failure_code: str | None = None
 
     def to_status_response(self) -> QuestionnaireStatusResponse:
         """Create the safe status response returned by the controller."""
@@ -35,6 +41,10 @@ class StoredQuestionnaireRun:
             questionnaire_identifier=self.questionnaire_identifier,
             questionnaire_version=self.questionnaire_version,
             submitted_at=self.submitted_at,
+            started_at=self.started_at,
+            completed_at=self.completed_at,
+            outputs=self.outputs or [],
+            failure_code=self.failure_code,
         )
 
 
@@ -68,6 +78,7 @@ class InMemoryQuestionnaireRunRepository:
                 questionnaire_version=questionnaire_version,
                 state=QuestionnaireRunState.QUEUED,
                 submitted_at=datetime.now(timezone.utc),
+                request=request,
             )
             self._runs_by_id[run.questionnaire_run_id] = run
             self._runs_by_idempotency_key[run.idempotency_key] = run
@@ -80,6 +91,33 @@ class InMemoryQuestionnaireRunRepository:
             if run is None:
                 raise QuestionnaireRunNotFound()
             return run
+
+    def mark_running(self, questionnaire_run_id: UUID) -> StoredQuestionnaireRun:
+        """Record that a queued run has entered background processing."""
+        with self._lock:
+            run = self.get(questionnaire_run_id)
+            run.state = QuestionnaireRunState.RUNNING
+            run.started_at = datetime.now(timezone.utc)
+            return run
+
+    def mark_succeeded(
+        self, questionnaire_run_id: UUID, outputs: list[QuestionnaireOutput]
+    ) -> StoredQuestionnaireRun:
+        """Store safe output metadata after successful rendering."""
+        with self._lock:
+            run = self.get(questionnaire_run_id)
+            run.state = QuestionnaireRunState.SUCCEEDED
+            run.outputs = outputs
+            run.completed_at = datetime.now(timezone.utc)
+            return run
+
+    def mark_failed(self, questionnaire_run_id: UUID, failure_code: str) -> None:
+        """Expose only a stable failure code, never private provider details."""
+        with self._lock:
+            run = self.get(questionnaire_run_id)
+            run.state = QuestionnaireRunState.FAILED
+            run.failure_code = failure_code
+            run.completed_at = datetime.now(timezone.utc)
 
     @staticmethod
     def _create_request_fingerprint(request: StartQuestionnaireRequest) -> str:
