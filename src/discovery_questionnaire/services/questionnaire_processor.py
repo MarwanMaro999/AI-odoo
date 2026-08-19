@@ -40,7 +40,12 @@ class QuestionnaireProcessor:
             configuration = self._registry.load(run.questionnaire_identifier)
             research_text = await self._get_research(run)
             generated = await self._generator.generate(
-                self._build_prompt(run.request, configuration.instruction, research_text)
+                self._build_prompt(
+                    run.request,
+                    configuration.instruction,
+                    research_text,
+                    configuration.questions_per_section,
+                )
             )
             output_path = self._renderer.render(questionnaire_run_id, generated.text)
             output = QuestionnaireOutput(
@@ -75,7 +80,10 @@ class QuestionnaireProcessor:
 
     @staticmethod
     def _build_prompt(
-        request: StartQuestionnaireRequest, instruction: str, research_text: str
+        request: StartQuestionnaireRequest,
+        instruction: str,
+        research_text: str,
+        questions_per_section: int,
     ) -> str:
         customer = request.customer
         materials = "\n\n".join(
@@ -84,36 +92,54 @@ class QuestionnaireProcessor:
         languages = ", ".join(request.options.languages)
         return f"""{instruction}
 
-Create a professional discovery questionnaire in these languages: {languages}.
-Do not invent facts. Ask questions where information is missing.
+Create a practical discovery questionnaire for a live customer meeting in these
+languages: {languages}. The consultant must be able to ask the questions naturally
+and use the answers to define scope, estimate effort, identify risks, and agree on
+next steps.
 
-Return only clean Markdown in this exact structure:
+Use the supplied material as known context. Do not ask for facts already provided.
+Do not invent facts, technical constraints, integrations, or regulations. Where
+information is missing, ask a concise, open-ended, non-leading question. Prioritize
+business value and the customer's current way of working before technical details.
+
+Create exactly {questions_per_section} primary questions in each of these sections:
+1. Business objectives, stakeholders, and success measures
+2. Current process, pain points, and priorities
+3. Required capabilities, users, roles, and reports
+4. Data, integrations, security, and compliance
+5. Delivery, adoption, acceptance criteria, timeline, and support
+
+Each question must be specific to this project. Include practical details where
+relevant, such as decision makers, exceptions, approval steps, volumes, ownership,
+existing systems, data quality, training, and measurable acceptance criteria.
+
+Return only clean Markdown in this exact order:
 # Discovery Questionnaire
 ## اللغة العربية
-### معلومات عامة عن المشروع
-1. سؤال واضح
-### المتطلبات الوظيفية
-2. سؤال واضح
-### التكامل والبيانات
-3. سؤال واضح
-### الأمان والخصوصية
-4. سؤال واضح
-### التنفيذ والقبول
-5. سؤال واضح
+### أهداف العمل وأصحاب المصلحة ومعايير النجاح
+1. سؤال
+### العملية الحالية ونقاط الألم والأولويات
+1. سؤال
+### القدرات المطلوبة والمستخدمون والأدوار والتقارير
+1. سؤال
+### البيانات والتكاملات والأمان والامتثال
+1. سؤال
+### التنفيذ والتبني والقبول والجدول الزمني والدعم
+1. سؤال
 ## English
-### General Project Information
-1. Clear question
-### Functional Requirements
-2. Clear question
-### Integration and Data
-3. Clear question
-### Security and Privacy
-4. Clear question
-### Delivery and Acceptance
-5. Clear question
+### Business Objectives, Stakeholders, and Success Measures
+1. Question
+### Current Process, Pain Points, and Priorities
+1. Question
+### Required Capabilities, Users, Roles, and Reports
+1. Question
+### Data, Integrations, Security, and Compliance
+1. Question
+### Delivery, Adoption, Acceptance Criteria, Timeline, and Support
+1. Question
 
-Use the same complete set of questions in Arabic and English. Do not add commentary,
-answers, source material, or a Markdown table.
+The Arabic and English sections must contain the same question pairs, translated
+faithfully. Do not add answers, explanations, sources, a summary, or a Markdown table.
 
 CUSTOMER
 Name: {customer.name}

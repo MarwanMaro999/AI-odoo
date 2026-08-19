@@ -49,6 +49,7 @@ class QuestionnaireConfiguration(BaseModel):
         min_length=1
     )
     outputs: list[QuestionnaireOutputDefinition] = Field(min_length=1)
+    questions_per_section: int = Field(default=4, ge=2, le=10)
     instruction: str = Field(min_length=1, repr=False, exclude=True)
 
 
@@ -62,6 +63,7 @@ class PublicQuestionnaireConfiguration(BaseModel):
     kind: str
     accepted_source_material: list[QuestionnaireInputRequirement]
     outputs: list[QuestionnaireOutputDefinition]
+    questions_per_section: int
 
     @classmethod
     def create_public_view(
@@ -74,4 +76,5 @@ class PublicQuestionnaireConfiguration(BaseModel):
             kind=configuration.kind,
             accepted_source_material=configuration.accepted_source_material,
             outputs=configuration.outputs,
+            questions_per_section=configuration.questions_per_section,
         )
