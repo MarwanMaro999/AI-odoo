@@ -27,9 +27,6 @@ openai==1.58.1
 
 # --- Web search provider ---
 
-# --- Job storage ---
-redis==5.2.1
-
 # --- Logging ---
 structlog==24.4.0
 
