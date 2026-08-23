@@ -1,0 +1,16 @@
+identifier: gen-strs
+version: "1.0-demo"
+kind: generator
+accepted_source_material: [meeting_transcript]
+outputs:
+  - document_type: strs
+    distribution_class: client_permitted
+  - document_type: strs
+    distribution_class: internal_only
+payload:
+  instruction: "Create a detailed Stakeholder Requirements Specification from the meeting transcript. Include business context, stakeholders, current-state pain points, functional requirements, data and integrations, roles and controls, reporting, non-functional requirements, assumptions/open questions, and measurable acceptance criteria. Make every requirement traceable to the transcript and separate facts from assumptions."
+  document_template: strs.docx
+  template_version: "pending-approval"
+  validation:
+    required_sections: ["Business requirements", "Functional requirements", "Acceptance criteria"]
+  reviewer_pairing: rev-strs

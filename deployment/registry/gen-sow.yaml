@@ -1,0 +1,17 @@
+identifier: gen-sow
+version: "1.0-demo"
+kind: generator
+accepted_source_material: [meeting_transcript]
+prerequisite_document_types: [strs]
+outputs:
+  - document_type: scope_of_work
+    distribution_class: client_permitted
+  - document_type: scope_of_work
+    distribution_class: internal_only
+payload:
+  instruction: "Create a detailed Scope of Work from the meeting transcript and requirements context. Include engagement objective, in-scope services, deliverables, phased approach, client responsibilities, OdooTec responsibilities, exclusions, assumptions/dependencies, acceptance gates, governance/change control, timeline dependencies, and open questions. Use explicit measurable language and do not claim unavailable facts."
+  document_template: scope_of_work.docx
+  template_version: "pending-approval"
+  validation:
+    required_sections: ["Objectives", "Scope", "Deliverables", "Acceptance criteria", "Assumptions"]
+  reviewer_pairing: rev-sow

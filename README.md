@@ -4,9 +4,9 @@
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=for-the-badge&logo=python)](https://www.python.org/)
 [![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge)](https://groq.com/)
 
-**Datum Engine** is an internal FastAPI service that generates bilingual discovery-questionnaire PDFs for OdooTec projects. It accepts staff-provided customer context and uploaded documents, enriches that context with optional public web research, then produces Arabic and English questions through cloud LLM providers.
+**Datum Engine** is OdooTec's internal asynchronous AI document-execution service. Odoo owns engagements, source revisions, approvals, document versions, findings, and review cycles; FastAPI executes versioned skills and returns validated document/review outputs.
 
-The service is currently a local development base. It deliberately has no database: temporary run state, background work, and generated files are local until Odoo and Redis integrations are added.
+This version runs locally: FastAPI keeps a small local queue and JSON run records, while Odoo remains the internal user interface and document system of record. No PostgreSQL, Redis, Docker, or separate worker service is required.
 
 ---
 
@@ -31,20 +31,16 @@ graph TD
 
 ---
 
-## Discovery Questionnaire Pipeline
+## Local execution pipeline
 
-1. **Extract files** — PDF, DOCX, TXT, and Markdown files are converted to safe text.
-2. **Accept a run** — the API validates the JSON request and enforces idempotency.
-3. **Queue processing** — the request returns immediately as `queued`; a local worker handles generation in the background.
-4. **Load configuration** — the questionnaire identifier resolves to an external YAML configuration. Its private instruction is never returned by the API or logs.
-5. **Research the company** — optional public research uses Groq Compound. A research failure does not block the run.
-6. **Generate questions** — Groq GPT-OSS generates the questionnaire.
-7. **Render the PDF** — Arabic text is shaped for RTL display and English content is kept in the same downloadable document.
-8. **Read the result** — runs move through `queued`, `running`, `succeeded`, or `failed`.
+1. **Accept** — Odoo submits a skill identifier/version, immutable source revisions, and parameters. FastAPI immediately returns `202 Accepted` with a run ID.
+2. **Queue** — local asynchronous workers process the run while Odoo polls its status.
+3. **Generate** — the selected external skill instruction and the registered source material are sent to Groq when configured; a detailed fallback supports offline testing.
+4. **Render** — FastAPI creates a Word document and a browser preview, then Odoo imports the finished files.
 
 ---
 
-## Current Features
+## Current features
 
 ### Discovery Questionnaire
 
@@ -58,17 +54,6 @@ graph TD
 - Idempotency protection.
 - Downloadable PDF output.
 - Safe error responses that do not expose prompts, instructions, or API keys.
-
-### Planned Integrations
-
-- Odoo as the persistent system of record for runs, files, and outputs.
-- Redis as the durable background queue.
-- API token authentication for Odoo requests.
-- Retry policy using `RUN_MAX_ATTEMPTS`.
-- Approved OdooTec document templates and structured model output validation.
-- Stakeholder requirements, review, scope-of-work, and clarification modules.
-
----
 
 ## Project Structure
 
@@ -99,10 +84,6 @@ datum-engine/
 │   │   ├── queue/             # Local async queue
 │   │   ├── rendering/         # Bilingual PDF renderer
 │   │   └── web_research/      # Groq Compound research
-│   ├── stakeholder_requirements/        # Future feature skeleton
-│   ├── stakeholder_requirements_review/ # Future feature skeleton
-│   ├── scope_of_work/                   # Future feature skeleton
-│   ├── scope_of_work_review/            # Future feature skeleton
 │   └── clarification/                   # Future feature skeleton
 └── tests/
     └── discovery_questionnaire/
@@ -136,7 +117,7 @@ GROQ_RESEARCH_MODEL=groq/compound
 DEV_OUTPUT_DIR=./.runtime/outputs
 ```
 
-`REGISTRY_PATH` must be an absolute path outside this repository. It contains the private questionnaire instruction, such as:
+`REGISTRY_PATH` must be an absolute path outside this repository. It contains a private, versioned skill definition. The deployed `deployment/registry` files are examples only; their placeholder instructions are deliberately rejected.
 
 ```yaml
 identifier: gen-discovery-questions
@@ -246,7 +227,42 @@ The test suite covers configuration safety, idempotency, run state, provider fal
 
 ## Development Notes
 
-- The current in-memory queue and run repository are for local development only. Restarting FastAPI clears them.
-- Generated PDFs are stored locally in `.runtime/outputs/`.
-- Authentication is not active yet. Keep the service local or on a protected internal network until it is added.
+- Local mode is for development only; it has no durable job queue or database.
+- The current setup is local-only: FastAPI and Odoo run on the same internal machine or network, with local background workers and JSON run-state files.
+- Generated output requires retention and backup management through the deployment volume or production object store.
+
+---
+
+## Foundation Architecture (Odoo 17)
+
+The production workflow is owned by the Odoo 17 `datum_engine` module. It stores
+engagements, immutable source artefact revisions, document versions, review cycles,
+findings, question sets, approvals, and AI run metadata. The FastAPI service performs
+only asynchronous AI execution and document rendering.
+
+The generic service endpoint is `POST /api/v1/runs`. Odoo supplies a skill
+identifier/version, source material revisions, and run parameters; it receives a run
+identifier immediately and polls its status. No request, response, log, or Odoo record
+contains a prompt or instruction.
+
+The placeholder registry is external to this repository. For this installation it is
+at `C:\ProgramData\OdooTec\datum-engine-registry` and contains the four configured
+demo entries: `gen-discovery-questions`, `gen-strs`, `gen-sow`, and `rev-sow`.
+
+Install the Odoo module from `odoo_addons/datum_engine` into Odoo's configured
+`custom_addons` directory, install it in Apps, then set the system parameter
+`datum_engine.service_url` to the running FastAPI service URL. The Odoo polling cron
+runs every minute.
+
+### Assumptions
+
+- Odoo administrators are the only users during this phase.
+- Every output requires a human approval before it can be cleared.
+- Authentication is intentionally deferred for the local demo phase.
+
+### Open questions
+
+- Confirm the final OdooTec Word templates and document metadata requirements.
+- Confirm the production queue and database platform before deployment.
+- Confirm the operational role responsible for changing the external skill registry.
 - Do not commit `.env`, model keys, generated PDFs, or the external YAML registry.

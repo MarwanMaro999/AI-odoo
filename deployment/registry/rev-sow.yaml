@@ -1,0 +1,11 @@
+identifier: rev-sow
+version: "1.0-demo"
+kind: auditor
+accepted_source_material: [meeting_transcript]
+issues_verdict: true
+outputs: []
+payload:
+  instruction: "Placeholder instruction."
+  validation:
+    require_finding_evidence: true
+  reviewer_pairing: gen-sow
