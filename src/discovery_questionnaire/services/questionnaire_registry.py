@@ -1,7 +1,6 @@
 """External YAML configuration loading for the discovery questionnaire."""
 
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import ValidationError

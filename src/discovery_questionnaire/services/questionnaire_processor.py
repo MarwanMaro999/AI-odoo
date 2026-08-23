@@ -113,6 +113,22 @@ Each question must be specific to this project. Include practical details where
 relevant, such as decision makers, exceptions, approval steps, volumes, ownership,
 existing systems, data quality, training, and measurable acceptance criteria.
 
+Bilingual equivalence is a hard requirement. First, create one canonical English
+question list internally, with stable pairs S1Q1 through S5Q{questions_per_section}.
+Then translate each canonical question faithfully into Arabic. Do not create the
+Arabic and English questions independently.
+
+For every matching Arabic/English pair, preserve the same intent, subject, scope,
+entities, qualifiers, assumptions, and expected answer. Never add, remove, merge,
+split, reorder, or substitute a question in either language. The Arabic question at
+section N, position M must be the translation of the English question at section N,
+position M. Keep the visible numbering identical, but do not print the internal IDs.
+
+Before producing the response, silently verify that both languages have exactly five
+sections, exactly {questions_per_section} questions in every section, and one
+semantically equivalent pair at every matching position. Correct any mismatch before
+returning the Markdown.
+
 Return only clean Markdown in this exact order:
 # Discovery Questionnaire
 ## اللغة العربية
@@ -138,8 +154,8 @@ Return only clean Markdown in this exact order:
 ### Delivery, Adoption, Acceptance Criteria, Timeline, and Support
 1. Question
 
-The Arabic and English sections must contain the same question pairs, translated
-faithfully. Do not add answers, explanations, sources, a summary, or a Markdown table.
+Do not add answers, explanations, sources, a summary, internal IDs, or a Markdown
+table.
 
 CUSTOMER
 Name: {customer.name}
