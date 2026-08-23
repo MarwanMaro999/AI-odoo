@@ -1,0 +1,16 @@
+identifier: gen-discovery-questions
+version: "1.0-demo"
+kind: generator
+accepted_source_material: [prospect_context]
+outputs:
+  - document_type: discovery_questionnaire
+    distribution_class: client_permitted
+payload:
+  instruction: "Create a comprehensive bilingual discovery questionnaire for an OdooTec consultant. Group questions by business goals, stakeholders, operations, data, integrations, reporting, security, delivery priorities, and acceptance criteria. Include at least 20 practical questions and a short public-context validation section."
+  document_template: discovery_questionnaire_client.docx
+  template_version: "pending-approval"
+  validation:
+    required_sections: ["Discovery objectives", "Business context", "Questions"]
+  tools:
+    web_research: optional
+  reviewer_pairing: rev-discovery-questions

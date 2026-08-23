@@ -1,0 +1,56 @@
+<odoo>
+  <record id="datum_engagement_view_tree" model="ir.ui.view">
+    <field name="name">datum.engagement.tree</field>
+    <field name="model">datum.engagement</field>
+    <field name="arch" type="xml">
+      <tree><field name="name"/><field name="workflow_status"/></tree>
+    </field>
+  </record>
+  <record id="datum_engagement_view_form" model="ir.ui.view">
+    <field name="name">datum.engagement.form.simple</field>
+    <field name="model">datum.engagement</field>
+    <field name="arch" type="xml">
+      <form string="Datum Project">
+        <header>
+          <button name="action_create_discovery_questions" type="object" string="Create Discovery Questions" class="btn-primary"/>
+          <button name="action_start_transcript_workflow" type="object" string="Create StRS" class="btn-primary"/>
+          <button name="action_create_scope_of_work" type="object" string="Create Scope of Work" class="btn-primary"/>
+        </header>
+        <sheet>
+          <div class="oe_title"><h1><field name="name" placeholder="Project or prospect name"/></h1><p><field name="workflow_status" readonly="1" nolabel="1"/></p></div>
+          <group string="1. What do we already know?"><field name="prospect_context" placeholder="Paste the prospect email, background, notes, or requirements here..."/></group>
+          <group string="2. Meeting transcript"><field name="meeting_transcript" placeholder="Paste the meeting transcript or detailed meeting notes here..."/></group>
+          <group string="3. Create documents"><div class="o_form_label">Create and approve the StRS first. Then create the Scope of Work from that approved StRS. Use Edit and Regenerate beside any completed document when you want the AI to make changes.</div></group>
+          <notebook>
+            <page string="Your Documents"><field name="document_version_ids" readonly="1"><tree create="0" delete="0"><field name="document_id"/><field name="version_number"/><field name="distribution_class"/><field name="state" widget="badge"/><field name="run_state" widget="badge" decoration-success="run_state == 'succeeded'" decoration-danger="run_state == 'failed'" decoration-warning="run_state in ('queued', 'running')"/><button name="action_clear" type="object" string="Approve" icon="fa-check"/><button name="action_open_regeneration_wizard" type="object" string="Edit &amp; Regenerate" icon="fa-pencil"/><button name="action_preview_document" type="object" string="Preview" icon="fa-eye"/><button name="action_download_document" type="object" string="Download Word" icon="fa-download"/></tree></field></page>
+            <page string="Work History"><field name="run_ids" readonly="1"><tree create="0" delete="0"><field name="skill_identifier"/><field name="state" widget="badge" decoration-success="state == 'succeeded'" decoration-danger="state == 'failed'" decoration-warning="state in ('queued', 'running')"/><field name="verdict"/><field name="failure_code" optional="show"/><button name="action_open_regeneration_wizard" type="object" string="Edit &amp; Regenerate" icon="fa-pencil"/></tree></field></page>
+          </notebook>
+        </sheet>
+      </form>
+    </field>
+  </record>
+  <record id="datum_regenerate_wizard_view_form" model="ir.ui.view">
+    <field name="name">datum.regenerate.wizard.form</field>
+    <field name="model">datum.regenerate.wizard</field>
+    <field name="arch" type="xml">
+      <form string="Edit and Regenerate">
+        <group>
+          <field name="document_version_id"/>
+          <field name="document_type"/>
+          <field name="instructions" placeholder="Describe exactly what must change. Example: add refund approval rules, remove excluded functionality, and make acceptance criteria measurable."/>
+        </group>
+        <footer>
+          <button name="action_regenerate" type="object" string="Regenerate New Version" class="btn-primary"/>
+          <button string="Cancel" special="cancel" class="btn-secondary"/>
+        </footer>
+      </form>
+    </field>
+  </record>
+  <record id="datum_engagement_action" model="ir.actions.act_window"><field name="name">Projects</field><field name="res_model">datum.engagement</field><field name="view_mode">tree,form</field></record>
+  <menuitem id="datum_engine_menu_root" name="Datum Engine" sequence="10" groups="base.group_system"/>
+  <menuitem id="datum_engagement_menu" name="Projects" parent="datum_engine_menu_root" action="datum_engagement_action" sequence="10"/>
+  <record id="datum_run_menu" model="ir.ui.menu"><field name="active">False</field></record>
+  <record id="datum_version_menu" model="ir.ui.menu"><field name="active">False</field></record>
+  <record id="datum_finding_menu" model="ir.ui.menu"><field name="active">False</field></record>
+  <record id="datum_questions_menu" model="ir.ui.menu"><field name="active">False</field></record>
+</odoo>

@@ -1,106 +1,268 @@
-# AI Research Service
+# Datum Engine
 
-A standalone FastAPI microservice that powers an AI-driven customer questionnaire generator for an Odoo 17 module (`ai_customer_questionnaire`). It receives customer information and uploaded documents from Odoo, performs document analysis and web research, and returns a structured, prioritized questionnaire.
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?style=for-the-badge&logo=python)](https://www.python.org/)
+[![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge)](https://groq.com/)
 
-## Overview
+**Datum Engine** is OdooTec's internal asynchronous AI document-execution service. Odoo owns engagements, source revisions, approvals, document versions, findings, and review cycles; FastAPI executes versioned skills and returns validated document/review outputs.
 
-Odoo owns the UI, workflow, and PDF output. This service owns everything AI-related:
+This version runs locally: FastAPI keeps a small local queue and JSON run records, while Odoo remains the internal user interface and document system of record. No PostgreSQL, Redis, Docker, or separate worker service is required.
 
+---
+
+## System Architecture
+
+```mermaid
+graph TD
+    U[Internal Staff / Postman] -->|Customer context or file| API[FastAPI API]
+    API -->|Create run| Q[In-memory async queue]
+    Q --> P[Questionnaire processor]
+
+    P -->|Load private instruction| R[External YAML registry]
+    P -->|Optional company research| C[Groq Compound]
+    P -->|Generate questionnaire| GR[Groq GPT-OSS]
+    P -->|Arabic + English content| PDF[Bilingual PDF renderer]
+    PDF --> O[.runtime/outputs]
+    API -->|Status / download| U
+
+    style API fill:#005571,stroke:#fff,stroke-width:2px,color:#fff
+    style GR fill:#F55036,stroke:#fff,stroke-width:2px,color:#fff
 ```
-Odoo (UI, files, form)  --->  FastAPI (analysis, research, LLM)  --->  Odoo (review, confirm, PDF)
-```
 
-**Pipeline:**
-1. Receive customer info + uploaded files (`pdf`, `docx`, `xlsx`) from Odoo
-2. Extract text/data from the uploaded documents
-3. Run web research on the customer/company
-4. Combine document data + web research + user notes
-5. Run gap analysis (known vs. missing vs. unclear vs. contradictory information)
-6. Generate a structured, prioritized questionnaire via an LLM
-7. Return structured JSON to Odoo (via job polling, since the pipeline can take 15–60s)
+---
 
-## Tech Stack
+## Local execution pipeline
 
-- **Framework:** FastAPI + Pydantic v2
-- **Python:** 3.12
-- **LLM providers:** Gemini (Google AI Studio), Groq, OpenRouter/DeepSeek — abstracted behind a common interface with a fallback chain
-- **Search provider:** Tavily (swappable)
-- **Document parsing:** pypdf / pdfplumber, python-docx, openpyxl
-- **Job handling:** in-memory store (Redis optional for later)
-- **No Docker** — runs as a plain local process via `uvicorn`
+1. **Accept** — Odoo submits a skill identifier/version, immutable source revisions, and parameters. FastAPI immediately returns `202 Accepted` with a run ID.
+2. **Queue** — local asynchronous workers process the run while Odoo polls its status.
+3. **Generate** — the selected external skill instruction and the registered source material are sent to Groq when configured; a detailed fallback supports offline testing.
+4. **Render** — FastAPI creates a Word document and a browser preview, then Odoo imports the finished files.
+
+---
+
+## Current features
+
+### Discovery Questionnaire
+
+- Arabic and English questionnaire generation.
+- Customer name, website, industry, country, and staff notes as input.
+- File-text extraction for PDF, DOCX, TXT, and Markdown attachments.
+- Optional company web research.
+- Groq GPT-OSS generation.
+- Groq Compound web research.
+- Asynchronous local processing with run status polling.
+- Idempotency protection.
+- Downloadable PDF output.
+- Safe error responses that do not expose prompts, instructions, or API keys.
 
 ## Project Structure
 
-```
-ai-research-service/
-├── app/
-│   ├── main.py
-│   ├── core/            # config, security, logging, exceptions
-│   ├── api/v1/           # routers and endpoints
-│   ├── schemas/          # Pydantic request/response models
-│   ├── services/         # orchestration logic
-│   ├── providers/        # LLM + search provider integrations
-│   ├── utils/             # file handling, chunking, validation
-│   └── middleware/
-├── tests/
-│   ├── unit/
-│   └── integration/
-├── .env.example
+```text
+datum-engine/
+├── .env                       # Local secrets; never commit this file
+├── .env.example               # Safe configuration template
 ├── requirements.txt
-└── README.md
+├── README.md
+├── src/
+│   ├── main.py                # FastAPI application and worker lifecycle
+│   ├── api/
+│   │   └── router.py          # Versioned /api/v1 routing
+│   ├── core/
+│   │   ├── config.py          # Typed environment settings
+│   │   ├── logging.py         # Safe structured logging
+│   │   ├── exceptions.py      # Domain exceptions
+│   │   └── error_handlers.py  # Safe HTTP error responses
+│   ├── discovery_questionnaire/
+│   │   ├── controller.py      # Questionnaire endpoints
+│   │   ├── dependencies.py    # Feature dependency wiring
+│   │   ├── repositories/      # Temporary in-memory run storage
+│   │   ├── schemas/           # Pydantic request, response, and YAML schemas
+│   │   └── services/          # Run service, registry, and processor
+│   ├── shared/
+│   │   ├── document_processing/ # PDF/DOCX/TXT extraction
+│   │   ├── llm/               # Groq generation interface
+│   │   ├── queue/             # Local async queue
+│   │   ├── rendering/         # Bilingual PDF renderer
+│   │   └── web_research/      # Groq Compound research
+│   └── clarification/                   # Future feature skeleton
+└── tests/
+    └── discovery_questionnaire/
 ```
 
-## Prerequisites
+---
 
-- [Anaconda / Miniconda](https://docs.conda.io/) installed
-- API keys for at least one LLM provider (Gemini, Groq, or OpenRouter) and one search provider (Tavily or equivalent)
+## Local Setup
 
-## Setup
+### 1. Prerequisites
 
-**1. Create and activate the conda environment**
+- Python 3.12 or newer.
+- A Groq API key for questionnaire generation and optional web research.
 
-```bash
-conda create -n ai-research python=3.12
-conda activate ai-research
-```
+### 2. Install dependencies
 
-**2. Install dependencies**
-
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-**3. Configure environment variables**
+### 3. Configure environment variables
 
-```bash
-cp .env.example .env
+Copy `.env.example` to `.env`, then configure it. Keep real secrets only in `.env`.
+
+```env
+REGISTRY_PATH=C:\tmp\datum-engine-registry
+
+GROQ_API_KEY=your_groq_key
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_RESEARCH_MODEL=groq/compound
+DEV_OUTPUT_DIR=./.runtime/outputs
 ```
 
-Then fill in `.env` with your keys:
+`REGISTRY_PATH` must be an absolute path outside this repository. It contains a private, versioned skill definition. The deployed `deployment/registry` files are examples only; their placeholder instructions are deliberately rejected.
 
-**4. Run the service**
-
-```bash
-uvicorn app.main:app --reload --port 8000
+```yaml
+identifier: gen-discovery-questions
+version: "0.1-demo"
+kind: generator
+accepted_source_material:
+  - type: prospect_context
+    required: true
+  - type: attachment
+    required: false
+outputs:
+  - document_type: discovery_questionnaire
+    distribution_class: client_permitted
+instruction: Create an evidence-based Arabic and English discovery questionnaire.
 ```
 
-The API will be available at `http://localhost:8000`, with interactive docs at `http://localhost:8000/docs`.
+### 4. Run the API
 
-## API Endpoints
-## Testing
-## Odoo Integration
+```powershell
+uvicorn src.main:app --reload
+```
 
-This service is called by the Odoo 17 module `ai_customer_questionnaire`, which:
-- Collects customer info and file uploads through a wizard
-- Sends them to this service via `services/ai_api_client.py`
-- Polls `/jobs/{job_id}` until the questionnaire is ready
-- Lets the employee review/edit/confirm questions
-- Generates the final PDF via QWeb
+Swagger UI is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
-The FastAPI base URL and auth token are configured in Odoo under Settings, stored via `ir.config_parameter`.
+---
 
-## Notes
+## API Usage
 
-- LLM and search providers are abstracted behind interfaces (`app/providers/`), so swapping providers is a config change, not a code change.
-- Free-tier LLM API limits change frequently — the provider fallback chain exists specifically to handle rate limits gracefully rather than failing the whole pipeline.
-- Uploaded files are processed from a temp directory and cleaned up after each request; nothing is persisted on disk long-term.
+Base URL:
+
+```text
+http://127.0.0.1:8000/api/v1
+```
+
+### Check questionnaire configuration
+
+```text
+GET /discovery-questionnaire/configuration/gen-discovery-questions
+```
+
+The response includes only safe metadata. The private `instruction` is excluded.
+
+### Extract an attachment
+
+```text
+POST /discovery-questionnaire/source-files/extract
+```
+
+Use `form-data` in Postman with a `file` field. Copy the returned object into `source_material` when creating a run.
+
+### Create a questionnaire run
+
+```text
+POST /discovery-questionnaire/runs
+```
+
+```json
+{
+  "questionnaire_identifier": "gen-discovery-questions",
+  "idempotency_key": "postman-test-001",
+  "customer": {
+    "name": "Example Company",
+    "website": "https://example.com",
+    "industry": "Construction",
+    "country": "Egypt",
+    "notes": "The company is considering a digital transformation project."
+  },
+  "source_material": [
+    {
+      "source_id": "staff-context-001",
+      "type": "prospect_context",
+      "origin": "staff_provided",
+      "text": "The customer needs a system for projects, sales, accounting, procurement, and reporting."
+    }
+  ],
+  "options": {
+    "languages": ["ar", "en"],
+    "web_research_enabled": false
+  }
+}
+```
+
+The API returns `202 Accepted` and a `questionnaire_run_id` immediately.
+
+### Poll status and download the PDF
+
+```text
+GET /discovery-questionnaire/runs/{questionnaire_run_id}
+GET /discovery-questionnaire/runs/{questionnaire_run_id}/output
+```
+
+Wait until the state is `succeeded`, then use **Send and Download** in Postman for the output request.
+
+---
+
+## Tests
+
+Run the test suite:
+
+```powershell
+python -m pytest tests -q
+```
+
+The test suite covers configuration safety, idempotency, run state, provider fallback, text extraction, and bilingual PDF generation without calling cloud providers.
+
+---
+
+## Development Notes
+
+- Local mode is for development only; it has no durable job queue or database.
+- The current setup is local-only: FastAPI and Odoo run on the same internal machine or network, with local background workers and JSON run-state files.
+- Generated output requires retention and backup management through the deployment volume or production object store.
+
+---
+
+## Foundation Architecture (Odoo 17)
+
+The production workflow is owned by the Odoo 17 `datum_engine` module. It stores
+engagements, immutable source artefact revisions, document versions, review cycles,
+findings, question sets, approvals, and AI run metadata. The FastAPI service performs
+only asynchronous AI execution and document rendering.
+
+The generic service endpoint is `POST /api/v1/runs`. Odoo supplies a skill
+identifier/version, source material revisions, and run parameters; it receives a run
+identifier immediately and polls its status. No request, response, log, or Odoo record
+contains a prompt or instruction.
+
+The placeholder registry is external to this repository. For this installation it is
+at `C:\ProgramData\OdooTec\datum-engine-registry` and contains the four configured
+demo entries: `gen-discovery-questions`, `gen-strs`, `gen-sow`, and `rev-sow`.
+
+Install the Odoo module from `odoo_addons/datum_engine` into Odoo's configured
+`custom_addons` directory, install it in Apps, then set the system parameter
+`datum_engine.service_url` to the running FastAPI service URL. The Odoo polling cron
+runs every minute.
+
+### Assumptions
+
+- Odoo administrators are the only users during this phase.
+- Every output requires a human approval before it can be cleared.
+- Authentication is intentionally deferred for the local demo phase.
+
+### Open questions
+
+- Confirm the final OdooTec Word templates and document metadata requirements.
+- Confirm the production queue and database platform before deployment.
+- Confirm the operational role responsible for changing the external skill registry.
+- Do not commit `.env`, model keys, generated PDFs, or the external YAML registry.

@@ -1,0 +1,1 @@
+"""Temporary local queue adapters."""
