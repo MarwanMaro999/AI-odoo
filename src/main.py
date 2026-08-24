@@ -40,6 +40,12 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     application.state.questionnaire_container = create_questionnaire_container(settings)
     application.state.engine_container = create_engine_container(settings)
     register_exception_handlers(application)
+
+    @application.get("/health", include_in_schema=False)
+    async def health_check() -> dict[str, str]:
+        """Lightweight liveness endpoint that never waits for a worker or provider."""
+        return {"status": "ok"}
+
     application.include_router(create_api_router())
     application.include_router(demo_router)
     return application

@@ -23,6 +23,7 @@ python-magic==0.4.27; sys_platform != 'win32'
 
 # --- LLM provider SDKs ---
 groq==0.13.1
+huggingface_hub>=1.7,<2
 openai==1.58.1
 
 # --- Web search provider ---

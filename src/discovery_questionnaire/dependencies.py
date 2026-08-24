@@ -13,7 +13,7 @@ from src.discovery_questionnaire.services.questionnaire_registry import (
 )
 from src.discovery_questionnaire.services.questionnaire_service import QuestionnaireService
 from src.discovery_questionnaire.services.questionnaire_processor import QuestionnaireProcessor
-from src.shared.llm.providers import GroqTextGenerator
+from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator, HuggingFaceTextGenerator, OpenAITextGenerator
 from src.shared.queue.in_memory_queue import InMemoryRunQueue
 from src.shared.rendering.questionnaire_pdf_renderer import QuestionnairePdfRenderer
 from src.shared.web_research.research_service import CompanyResearchService
@@ -34,7 +34,10 @@ def create_questionnaire_container(settings: Settings) -> QuestionnaireContainer
     processor = QuestionnaireProcessor(
         repository=repository,
         registry=registry,
-        generator=GroqTextGenerator(settings),
+        generator=FallbackTextGenerator([
+            GroqTextGenerator(settings),
+            HuggingFaceTextGenerator(settings),
+        ]),
         research=CompanyResearchService(settings),
         renderer=QuestionnairePdfRenderer(settings.dev_output_dir),
     )

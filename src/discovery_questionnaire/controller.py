@@ -1,5 +1,6 @@
 """FastAPI controller for the discovery-questionnaire module."""
 
+import asyncio
 from uuid import UUID
 
 from uuid import uuid4
@@ -60,14 +61,33 @@ async def get_questionnaire_configuration(
 
 @router.post("/source-files/extract", response_model=QuestionnaireSource)
 async def extract_source_file(file: UploadFile = File(...)) -> QuestionnaireSource:
-    """Extract PDF/DOCX/TXT content to use in a subsequent JSON run request."""
+    """Extract a bounded source file without blocking FastAPI's event loop."""
     content = await file.read()
-    if len(content) > get_settings().max_upload_size_bytes:
+    settings = get_settings()
+    if len(content) > settings.max_upload_size_bytes:
         raise HTTPException(status_code=413, detail="The uploaded file is too large")
     try:
-        text = extract_text(file.filename or "upload", content)
+        text = await asyncio.wait_for(
+            asyncio.to_thread(
+                extract_text,
+                file.filename or "upload",
+                content,
+                settings.document_extraction_max_pdf_pages,
+            ),
+            timeout=settings.document_extraction_timeout_seconds,
+        )
+    except TimeoutError as error:
+        raise HTTPException(
+            status_code=504,
+            detail="Document extraction timed out. Upload a smaller text-based document or paste its text.",
+        ) from error
     except UnsupportedDocumentError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    if len(text.encode("utf-8")) > settings.document_extraction_max_text_bytes:
+        raise HTTPException(
+            status_code=422,
+            detail="The extracted document text is too large. Upload a smaller document or paste the relevant sections.",
+        )
     return QuestionnaireSource(
         source_id=str(uuid4()),
         type="attachment",

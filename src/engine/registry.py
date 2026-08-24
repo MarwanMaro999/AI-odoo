@@ -84,9 +84,10 @@ class SkillRegistry:
             "instruction_ref": raw.get("instruction_ref"),
             "mandatory_source_material": mandatory,
             "prerequisites": raw.get("prerequisites", []),
+            "reviewer": raw.get("reviewer"),
             "raw_registry_metadata": {
                 key: raw.get(key)
-                for key in ("guards", "resolution_routes", "finding_attributes", "lineage", "versioning")
+                for key in ("guards", "resolution_routes", "finding_attributes", "lineage", "versioning", "reviewer")
                 if key in raw
             },
         }

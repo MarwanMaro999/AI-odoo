@@ -7,7 +7,9 @@ import hashlib
 from html import escape
 import json
 from pathlib import Path
+import re
 from threading import RLock
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 from docx import Document
@@ -221,7 +223,7 @@ class DatumDocxRenderer:
 
 
 class DatumOrchestrator:
-    def __init__(self, repository: PersistentRunRepository, registry: SkillRegistry, renderer: DatumDocxRenderer, max_attempts: int = 3, research_service: CompanyResearchService | None = None, text_generator: GroqTextGenerator | None = None, prompt_registry: PromptRegistry | None = None, allow_demo_outputs: bool = False, max_source_bytes: int = 240_000) -> None:
+    def __init__(self, repository: PersistentRunRepository, registry: SkillRegistry, renderer: DatumDocxRenderer, max_attempts: int = 3, research_service: CompanyResearchService | None = None, text_generator: GroqTextGenerator | None = None, prompt_registry: PromptRegistry | None = None, allow_demo_outputs: bool = False, max_source_bytes: int = 14_000, quality_attempts: int = 3) -> None:
         self._repository = repository
         self._registry = registry
         self._renderer = renderer
@@ -230,6 +232,7 @@ class DatumOrchestrator:
         self._prompt_registry = prompt_registry
         self._allow_demo_outputs = allow_demo_outputs
         self._max_source_bytes = max_source_bytes
+        self._quality_attempts = quality_attempts
         self._max_attempts = max_attempts
 
     async def process(self, run_id: UUID) -> None:
@@ -276,16 +279,44 @@ class DatumOrchestrator:
                 " ".join(source.text for source in run.request.source_material)[:4_000]
             ) if self._research_service else None
             research = research_result.text if research_result else ""
+        reviewer = payload.get("reviewer")
+        max_cycles = int(reviewer.get("max_cycles", 1)) if isinstance(reviewer, dict) else 1
+        parameters = dict(run.request.parameters)
+        previous_blocking_keys: set[str] = set()
+        for cycle in range(1, max_cycles + 1):
+            generated: list[tuple[object, list[tuple[str, list[str]]], list[str]]] = []
+            for output in definition.outputs:
+                sections, source_references = await self._generate_sections(
+                    run.request.skill.identifier,
+                    run.request.source_material,
+                    parameters,
+                    research,
+                    output.distribution_class,
+                    payload,
+                )
+                generated.append((output, sections, source_references))
+            if not isinstance(reviewer, dict):
+                break
+            verdict, findings = await self._review_generated_document(run, generated[-1][1], reviewer, parameters)
+            run.status.verdict = verdict
+            run.status.findings = findings
+            self._record(run, "review_generated_document", "succeeded", {"cycle": cycle, "verdict": verdict, "finding_count": len(findings)})
+            blocking = [finding for finding in findings if finding.severity == "blocking"]
+            if verdict == Verdict.CLEARED and not blocking:
+                break
+            regenerative = [finding for finding in blocking if finding.resolution_route == "regenerate"]
+            blocking_keys = {finding.finding_key for finding in blocking}
+            if not regenerative:
+                raise ValueError("sow_review_requires_human_clarification_or_waiver")
+            if blocking_keys == previous_blocking_keys:
+                raise ValueError("sow_review_no_progress_escalated")
+            previous_blocking_keys = blocking_keys
+            parameters["directed_findings"] = [finding.model_dump(mode="json") for finding in regenerative]
+        else:
+            raise ValueError("sow_review_cycle_ceiling_escalated")
+
         outputs: list[RunOutput] = []
-        for output in definition.outputs:
-            sections, source_references = await self._generate_sections(
-                run.request.skill.identifier,
-                run.request.source_material,
-                run.request.parameters,
-                research,
-                output.distribution_class,
-                payload,
-            )
+        for output, sections, source_references in generated:
             path = self._renderer.render(run.status.run_id, output.document_type, sections, output.distribution_class)
             preview = self._renderer.render_preview(run.status.run_id, output.document_type, sections, output.distribution_class)
             source_text = "\n\n".join(
@@ -295,6 +326,41 @@ class DatumOrchestrator:
             outputs.append(RunOutput(output_id=uuid4(), document_type=output.document_type, distribution_class=output.distribution_class, filename=path.name, download_url=f"/api/v1/runs/{run.status.run_id}/outputs/{path.name}", preview_url=f"/api/v1/runs/{run.status.run_id}/outputs/{preview.name}", source_references=source_references, skill_version=definition.version, template_version=str(payload.get("template_version", "unversioned")), source_text=source_text))
         run.status.outputs = outputs
         self._record(run, "render_and_validate", "succeeded", {"output_count": len(outputs)})
+
+    async def _review_generated_document(self, run: StoredRun, sections: list[tuple[str, list[str]]], reviewer: dict[str, object], parameters: dict[str, object]) -> tuple[Verdict, list[FindingPayload]]:
+        identifier = str(reviewer.get("identifier", ""))
+        version = str(reviewer.get("version", ""))
+        _, payload = self._registry.load(identifier, version)
+        if not self._text_generator or not self._prompt_registry:
+            raise ValueError("source_grounded_generation_unavailable")
+        source_text = "\n\n".join(
+            f"{title}\n" + "\n".join(f"- {point}" for point in points)
+            for title, points in sections
+        )
+        review_sources = list(run.request.source_material) + [
+            SimpleNamespace(source_id="generated-document", name="Generated document", text=source_text)
+        ]
+        instruction = self._prompt_registry.resolve(str(payload.get("instruction_ref") or ""))
+        prompt = (
+            f"{instruction}\n\nReturn JSON only: {{\"verdict\":\"cleared|not_cleared\","
+            "\"findings\":[{\"finding_key\":string,\"severity\":\"blocking|advisory\","
+            "\"category\":string,\"location\":string,\"summary\":string,\"evidence\":string,"
+            "\"resolution_route\":\"regenerate|clarify|waive\",\"prior_outcome\":string|null}]}. "
+            "Do not rewrite the document. Use only supplied evidence.\n\nSOURCE MATERIAL\n"
+            f"{self._bounded_source_text(review_sources)}\n\nRUN PARAMETERS\n{json.dumps(parameters, ensure_ascii=False)}"
+        )
+        generated = await self._text_generator.generate(prompt)
+        try:
+            result = json.loads(generated.text.strip().removeprefix("```json").removesuffix("```").strip())
+            verdict = Verdict(str(result.get("verdict")))
+            findings = [FindingPayload.model_validate(item) for item in result.get("findings", [])]
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            raise ValueError("audit_output_invalid") from error
+        if verdict == Verdict.CLEARED and any(item.severity == "blocking" for item in findings):
+            raise ValueError("audit_verdict_conflicts_with_blocking_findings")
+        if verdict == Verdict.NOT_CLEARED and not findings:
+            raise ValueError("audit_output_findings_missing")
+        return verdict, findings
 
     async def _generate_sections(
         self,
@@ -322,10 +388,20 @@ class DatumOrchestrator:
             f"SOURCE MATERIAL\n{source_text}\n\nPUBLIC RESEARCH (validate before relying on it)\n{research or 'Not available.'}\n\n"
             f"RUN PARAMETERS\n{json.dumps(parameters, ensure_ascii=False)}"
         )
-        generated = await self._text_generator.generate(prompt)
-        sections, references = self._parse_structured_sections(generated.text)
-        references = self._validate_generated_sections(identifier, sections, references, sources)
-        return self._with_revision_notes(sections, parameters), references
+        last_error: ValueError | None = None
+        for _quality_attempt in range(1, self._quality_attempts + 1):
+            correction = "" if last_error is None else (
+                "\n\nQUALITY CORRECTION REQUIRED\nYour prior output was rejected with: "
+                f"{last_error}. Return a complete replacement JSON document that fixes every issue."
+            )
+            generated = await self._text_generator.generate(prompt + correction)
+            try:
+                sections, references = self._parse_structured_sections(generated.text)
+                references = self._validate_generated_sections(identifier, sections, references, sources)
+                return self._with_revision_notes(sections, parameters), references
+            except ValueError as error:
+                last_error = error
+        raise ValueError(f"generation_quality_gate_failed:{last_error}")
 
     def _bounded_source_text(self, sources: list[object]) -> str:
         """Keep a provider request bounded while preserving every source identity.
@@ -412,11 +488,48 @@ class DatumOrchestrator:
         if identifier in {"gen-discovery-questions", "gen-strs"} and any(word in content and word not in source_text for word in prohibited):
             raise ValueError("generation_output_unsupported_claim")
         if identifier == "gen-discovery-questions":
-            arabic_count = sum(any("\u0600" <= character <= "\u06ff" for character in point) for _, points in sections for point in points)
-            english_count = sum(any("a" <= character.lower() <= "z" for character in point) for _, points in sections for point in points)
-            if not arabic_count or not english_count:
-                raise ValueError("questionnaire_bilingual_output_invalid")
+            points = [point for _, section_points in sections for point in section_points]
+            if len(points) < 18 or any(not any("\u0600" <= character <= "\u06ff" for character in point) for point in points):
+                raise ValueError("questionnaire_arabic_content_invalid")
+            arabic_only = re.sub(r"Datum Engine|OdooTec|Odoo", "", " ".join(points), flags=re.IGNORECASE)
+            non_arabic = re.search(r"[A-Za-z]{3,}", arabic_only)
+            if non_arabic:
+                raise ValueError(
+                    "questionnaire_non_arabic_phrase_not_allowed:"
+                    + non_arabic.group(0)
+                )
+            titles = [title.casefold() for title, _ in sections]
+            if len(set(titles)) != len(titles) or any(len(points) < 2 for _, points in sections):
+                raise ValueError("questionnaire_section_structure_invalid")
+            DatumOrchestrator._require_titles(
+                sections,
+                ("الأهداف", "أصحاب المصلحة", "سير العمل", "المعلومات", "الحوكمة", "التسليم"),
+                "questionnaire_required_sections_missing",
+            )
+        if identifier == "gen-strs":
+            DatumOrchestrator._require_titles(
+                sections,
+                ("purpose", "stakeholder", "functional", "security", "lineage", "non-functional", "acceptance", "assumption", "open decision"),
+                "strs_required_sections_missing",
+            )
+            if re.search(r"\bDE-REQ-\d{3,}\b", " ".join(point for _, points in sections for point in points)):
+                raise ValueError("strs_requirement_ids_not_allowed")
+            acceptance_points = [points for title, points in sections if "acceptance" in title.casefold()]
+            if not acceptance_points or len(acceptance_points[0]) < 3:
+                raise ValueError("strs_acceptance_criteria_incomplete")
+        if identifier == "gen-sow":
+            DatumOrchestrator._require_titles(
+                sections,
+                ("objective", "scope", "deliverable", "responsibil", "exclusion", "dependenc", "governance", "acceptance"),
+                "sow_required_sections_missing",
+            )
         return list(dict.fromkeys(reference for reference in canonical_references if reference is not None))
+
+    @staticmethod
+    def _require_titles(sections: list[tuple[str, list[str]]], required: tuple[str, ...], failure_code: str) -> None:
+        titles = " ".join(title.casefold() for title, _ in sections)
+        if any(item not in titles for item in required):
+            raise ValueError(failure_code)
 
     @staticmethod
     def _with_revision_notes(
