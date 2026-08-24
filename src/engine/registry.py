@@ -91,7 +91,7 @@ class SkillRegistry:
             },
         }
         if isinstance(placeholder, dict) and placeholder.get("active"):
-            payload["instruction"] = "Placeholder instruction."
+            payload["placeholder_active"] = True
         return public, payload
 
     def list_public(self) -> list[PublicSkillDefinition]:

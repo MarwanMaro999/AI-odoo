@@ -46,3 +46,10 @@ class QuestionnaireProviderUnavailable(QuestionnaireError):
     status_code = 503
     error_code = "questionnaire_provider_unavailable"
     public_message = "The questionnaire service is temporarily unavailable."
+
+
+class QuestionnaireProviderRequestRejected(QuestionnaireProviderUnavailable):
+    """Raised when a provider rejects a request that cannot succeed on retry."""
+
+    error_code = "questionnaire_provider_request_rejected"
+    public_message = "The document request exceeds the current AI provider limit."

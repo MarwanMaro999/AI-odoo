@@ -17,6 +17,8 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from src.engine.registry import SkillRegistry, SkillRegistryError
+from src.engine.prompt_registry import PromptRegistry
+from src.core.exceptions import QuestionnaireProviderRequestRejected
 from src.engine.schemas import (
     DistributionClass,
     FindingPayload,
@@ -219,12 +221,15 @@ class DatumDocxRenderer:
 
 
 class DatumOrchestrator:
-    def __init__(self, repository: PersistentRunRepository, registry: SkillRegistry, renderer: DatumDocxRenderer, max_attempts: int = 3, research_service: CompanyResearchService | None = None, text_generator: GroqTextGenerator | None = None) -> None:
+    def __init__(self, repository: PersistentRunRepository, registry: SkillRegistry, renderer: DatumDocxRenderer, max_attempts: int = 3, research_service: CompanyResearchService | None = None, text_generator: GroqTextGenerator | None = None, prompt_registry: PromptRegistry | None = None, allow_demo_outputs: bool = False, max_source_bytes: int = 240_000) -> None:
         self._repository = repository
         self._registry = registry
         self._renderer = renderer
         self._research_service = research_service
         self._text_generator = text_generator
+        self._prompt_registry = prompt_registry
+        self._allow_demo_outputs = allow_demo_outputs
+        self._max_source_bytes = max_source_bytes
         self._max_attempts = max_attempts
 
     async def process(self, run_id: UUID) -> None:
@@ -242,7 +247,7 @@ class DatumOrchestrator:
                 self._validate_input(run.request, definition, payload)
                 self._record(run, "validate_input", "succeeded")
                 if definition.kind.value == "auditor":
-                    self._complete_audit(run, definition, payload)
+                    await self._complete_audit(run, definition, payload)
                 else:
                     await self._complete_generation(run, definition, payload)
                 run.status.state = RunState.SUCCEEDED
@@ -250,7 +255,7 @@ class DatumOrchestrator:
                 self._record(run, "orchestration", "succeeded")
                 self._repository.save(run)
                 return
-            except (SkillRegistryError, ValueError) as error:
+            except (SkillRegistryError, ValueError, QuestionnaireProviderRequestRejected) as error:
                 run.status.failure_code = str(error) or "validation_failed"
                 self._record(run, "orchestration", "failed", {"failure_code": run.status.failure_code})
                 break
@@ -273,13 +278,13 @@ class DatumOrchestrator:
             research = research_result.text if research_result else ""
         outputs: list[RunOutput] = []
         for output in definition.outputs:
-            sections = await self._generate_sections(
+            sections, source_references = await self._generate_sections(
                 run.request.skill.identifier,
                 run.request.source_material,
                 run.request.parameters,
                 research,
                 output.distribution_class,
-                str(payload.get("instruction", "")),
+                payload,
             )
             path = self._renderer.render(run.status.run_id, output.document_type, sections, output.distribution_class)
             preview = self._renderer.render_preview(run.status.run_id, output.document_type, sections, output.distribution_class)
@@ -287,7 +292,7 @@ class DatumOrchestrator:
                 f"{title}\n" + "\n".join(f"- {paragraph}" for paragraph in paragraphs)
                 for title, paragraphs in sections
             )
-            outputs.append(RunOutput(output_id=uuid4(), document_type=output.document_type, distribution_class=output.distribution_class, filename=path.name, download_url=f"/api/v1/runs/{run.status.run_id}/outputs/{path.name}", preview_url=f"/api/v1/runs/{run.status.run_id}/outputs/{preview.name}", source_text=source_text))
+            outputs.append(RunOutput(output_id=uuid4(), document_type=output.document_type, distribution_class=output.distribution_class, filename=path.name, download_url=f"/api/v1/runs/{run.status.run_id}/outputs/{path.name}", preview_url=f"/api/v1/runs/{run.status.run_id}/outputs/{preview.name}", source_references=source_references, skill_version=definition.version, template_version=str(payload.get("template_version", "unversioned")), source_text=source_text))
         run.status.outputs = outputs
         self._record(run, "render_and_validate", "succeeded", {"output_count": len(outputs)})
 
@@ -298,37 +303,120 @@ class DatumOrchestrator:
         parameters: dict[str, object],
         research: str,
         distribution: DistributionClass,
-        instruction: str,
-    ) -> list[tuple[str, list[str]]]:
-        """Use the externally registered demo instruction when a model is configured.
+        payload: dict[str, object],
+    ) -> tuple[list[tuple[str, list[str]]], list[str]]:
+        """Generate structured source-grounded content or fail safely.
 
-        The static structure remains a safe fallback so a missing model never blocks Odoo testing.
+        Production never substitutes a generic document for unavailable or malformed AI output.
         """
-        if not self._text_generator:
-            return self._with_revision_notes(
-                self._placeholder_sections(identifier, sources, parameters, research, distribution), parameters
-            )
-        if not instruction or instruction.lower().startswith("placeholder"):
-            instruction = self._demo_instruction(identifier)
-        source_text = "\n\n".join(f"[{source.name}]\n{source.text}" for source in sources)
+        if not self._text_generator or not self._prompt_registry:
+            return self._demo_or_fail(identifier, sources, parameters, research, distribution)
+        instruction = self._prompt_registry.resolve(str(payload.get("instruction_ref") or ""))
+        source_text = self._bounded_source_text(sources)
         prompt = (
             f"{instruction}\n\n"
             "Use only the supplied source material. Do not invent company facts. Where information is absent, write it as an explicit assumption or open question. "
-            "Return a detailed consultant-ready document using this exact plain-text format: each section begins with '## ', and every point under it begins with '- '. "
+            "Return JSON only in this schema: {\"sections\":[{\"title\":string,\"points\":[string]}],\"source_references\":[string]}. "
+            "source_references must contain only source IDs supplied below. Every section needs at least one point. "
             f"Document skill: {identifier}. Distribution: {distribution.value}.\n\n"
             f"SOURCE MATERIAL\n{source_text}\n\nPUBLIC RESEARCH (validate before relying on it)\n{research or 'Not available.'}\n\n"
             f"RUN PARAMETERS\n{json.dumps(parameters, ensure_ascii=False)}"
         )
-        try:
-            generated = await self._text_generator.generate(prompt)
-            sections = self._parse_generated_sections(generated.text)
-            if len(sections) >= 5:
-                return sections
-        except Exception:
-            pass
-        return self._with_revision_notes(
+        generated = await self._text_generator.generate(prompt)
+        sections, references = self._parse_structured_sections(generated.text)
+        references = self._validate_generated_sections(identifier, sections, references, sources)
+        return self._with_revision_notes(sections, parameters), references
+
+    def _bounded_source_text(self, sources: list[object]) -> str:
+        """Keep a provider request bounded while preserving every source identity.
+
+        The gateway limits request *bytes*, not Python characters.  Splitting the
+        available budget fairly and retaining both ends of a source is safer than
+        silently discarding later documents or letting a huge attachment fail the run.
+        """
+        if not sources:
+            return ""
+        per_source = max(1, self._max_source_bytes // len(sources))
+        blocks: list[str] = []
+        for source in sources:
+            identity = f"[{source.source_id}: {source.name}]\n"
+            reserved = len(identity.encode("utf-8"))
+            body = self._truncate_utf8(str(source.text), max(1, per_source - reserved))
+            blocks.append(identity + body)
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _truncate_utf8(text: str, max_bytes: int) -> str:
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        marker = "\n\n[Source truncated for provider request size; consult the retained source artifact for full text.]\n\n"
+        marker_bytes = marker.encode("utf-8")
+        if max_bytes <= len(marker_bytes):
+            return marker_bytes[:max_bytes].decode("utf-8", errors="ignore")
+        remaining = max_bytes - len(marker_bytes)
+        head_size = remaining // 2
+        tail_size = remaining - head_size
+        head = encoded[:head_size].decode("utf-8", errors="ignore")
+        tail = encoded[-tail_size:].decode("utf-8", errors="ignore")
+        return head + marker + tail
+
+    def _demo_or_fail(self, identifier: str, sources: list[object], parameters: dict[str, object], research: str, distribution: DistributionClass) -> tuple[list[tuple[str, list[str]]], list[str]]:
+        if not self._allow_demo_outputs:
+            raise ValueError("source_grounded_generation_unavailable")
+        sections = self._with_revision_notes(
             self._placeholder_sections(identifier, sources, parameters, research, distribution), parameters
         )
+        return [("DEMO OUTPUT — NOT SOURCE GROUNDED", ["Configure a model and private prompt registry before using this document."])] + sections, []
+
+    @staticmethod
+    def _parse_structured_sections(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            candidate = candidate.split("\n", 1)[1] if "\n" in candidate else ""
+            candidate = candidate.rsplit("```", 1)[0].strip()
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as error:
+            raise ValueError("generation_output_not_json") from error
+        raw_sections = payload.get("sections") if isinstance(payload, dict) else None
+        if not isinstance(raw_sections, list):
+            raise ValueError("generation_output_sections_missing")
+        sections: list[tuple[str, list[str]]] = []
+        for item in raw_sections:
+            if not isinstance(item, dict):
+                raise ValueError("generation_output_section_invalid")
+            title = str(item.get("title", "")).strip()
+            points = [str(point).strip() for point in item.get("points", []) if str(point).strip()]
+            if not title or not points:
+                raise ValueError("generation_output_section_invalid")
+            sections.append((title, points))
+        references = [str(value) for value in payload.get("source_references", []) if str(value).strip()]
+        return sections, references
+
+    @staticmethod
+    def _validate_generated_sections(identifier: str, sections: list[tuple[str, list[str]]], references: list[str], sources: list[object]) -> list[str]:
+        if len(sections) < 4 or sum(len(points) for _, points in sections) < 8:
+            raise ValueError("generation_output_incomplete")
+        aliases = {
+            alias.casefold(): str(source.source_id)
+            for source in sources
+            for alias in (str(source.source_id), str(getattr(source, "name", source.source_id)))
+        }
+        canonical_references = [aliases.get(reference.strip().casefold()) for reference in references]
+        if not references or any(reference is None for reference in canonical_references):
+            raise ValueError("generation_output_source_references_invalid")
+        content = " ".join(title + " " + " ".join(points) for title, points in sections).lower()
+        source_text = " ".join(str(source.text).lower() for source in sources)
+        prohibited = ("seller", "inventory", "fulfilment", "fulfillment", "commissions")
+        if identifier in {"gen-discovery-questions", "gen-strs"} and any(word in content and word not in source_text for word in prohibited):
+            raise ValueError("generation_output_unsupported_claim")
+        if identifier == "gen-discovery-questions":
+            arabic_count = sum(any("\u0600" <= character <= "\u06ff" for character in point) for _, points in sections for point in points)
+            english_count = sum(any("a" <= character.lower() <= "z" for character in point) for _, points in sections for point in points)
+            if not arabic_count or not english_count:
+                raise ValueError("questionnaire_bilingual_output_invalid")
+        return list(dict.fromkeys(reference for reference in canonical_references if reference is not None))
 
     @staticmethod
     def _with_revision_notes(
@@ -377,22 +465,39 @@ class DatumOrchestrator:
             sections.append((title, points))
         return sections
 
-    def _complete_audit(self, run: StoredRun, _: PublicSkillDefinition, __: dict[str, object]) -> None:
-        target = str(run.request.parameters.get("target_document_version", "unknown version"))
-        prior = run.request.parameters.get("carried_findings", [])
-        findings: list[FindingPayload] = [FindingPayload(
-            finding_key="scope-acceptance-criteria",
-            severity="blocking",
-            category="completeness",
-            location="Acceptance criteria",
-            summary=f"Add measurable acceptance criteria for {target}.",
-            evidence="The submitted document version does not contain measurable acceptance criteria.",
-            resolution_route="regenerate",
-            prior_outcome="carried" if prior else None,
-        )]
+    async def _complete_audit(self, run: StoredRun, _: PublicSkillDefinition, payload: dict[str, object]) -> None:
+        """Produce independent, structured review findings from the registered skill."""
+        if not self._text_generator or not self._prompt_registry:
+            if not self._allow_demo_outputs:
+                raise ValueError("source_grounded_generation_unavailable")
+            run.status.findings = []
+            run.status.verdict = Verdict.NOT_CLEARED
+            self._record(run, "audit_and_validate", "demo", {"verdict": "not_cleared"})
+            return
+        instruction = self._prompt_registry.resolve(str(payload.get("instruction_ref") or ""))
+        source_text = self._bounded_source_text(run.request.source_material)
+        prompt = (
+            f"{instruction}\n\nReturn JSON only: {{\"verdict\":\"cleared|not_cleared\","
+            "\"findings\":[{\"finding_key\":string,\"severity\":\"blocking|advisory\","
+            "\"category\":string,\"location\":string,\"summary\":string,\"evidence\":string,"
+            "\"resolution_route\":\"regenerate|clarify|waive\",\"prior_outcome\":string|null}]}. "
+            "Do not rewrite the document. Use only supplied evidence.\n\nSOURCE MATERIAL\n"
+            f"{source_text}\n\nRUN PARAMETERS\n{json.dumps(run.request.parameters, ensure_ascii=False)}"
+        )
+        generated = await self._text_generator.generate(prompt)
+        try:
+            result = json.loads(generated.text.strip().removeprefix("```json").removesuffix("```").strip())
+            verdict = Verdict(str(result.get("verdict")))
+            findings = [FindingPayload.model_validate(item) for item in result.get("findings", [])]
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            raise ValueError("audit_output_invalid") from error
+        if verdict == Verdict.CLEARED and any(item.severity == "blocking" for item in findings):
+            raise ValueError("audit_verdict_conflicts_with_blocking_findings")
+        if verdict == Verdict.NOT_CLEARED and not findings:
+            raise ValueError("audit_output_findings_missing")
         run.status.findings = findings
-        run.status.verdict = Verdict.CLEARED if not findings else Verdict.NOT_CLEARED
-        self._record(run, "audit_and_validate", "succeeded", {"verdict": run.status.verdict, "finding_count": len(findings)})
+        run.status.verdict = verdict
+        self._record(run, "audit_and_validate", "succeeded", {"verdict": verdict, "finding_count": len(findings)})
 
     @staticmethod
     def _placeholder_sections(identifier: str, sources: list[object], parameters: dict[str, object], research: str = "", distribution: DistributionClass = DistributionClass.CLIENT_PERMITTED) -> list[tuple[str, list[str]]]:
