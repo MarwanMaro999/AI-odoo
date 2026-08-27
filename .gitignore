@@ -1,4 +1,5 @@
 .env
 .runtime/
+artifacts/
 __pycache__/
 .vscode/
