@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse
 
 from src.engine.schemas import RunStatus, StartRunRequest
+from src.core.security import require_engine_token
 from src.engine.service import EngineService
 
-router = APIRouter(prefix="/runs", tags=["runs"])
+router = APIRouter(prefix="/runs", tags=["runs"], dependencies=[Depends(require_engine_token)])
 
 
 def get_engine_service(request: Request) -> EngineService:

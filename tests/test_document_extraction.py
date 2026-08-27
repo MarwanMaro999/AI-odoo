@@ -1,21 +1,26 @@
 """Tests for bounded document-source extraction."""
 
-from io import BytesIO
-
 import pytest
-from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
+from pydantic import SecretStr
+
 from src.core.config import Settings
-from src.discovery_questionnaire.controller import extract_source_file
 from src.main import create_application
 
 
 @pytest.mark.asyncio
 async def test_extract_source_file_returns_text_for_small_txt_upload() -> None:
-    upload = UploadFile(filename="brief.txt", file=BytesIO(b"Datum Engine project brief"))
+    app = create_application(Settings(datum_engine_api_auth_token=SecretStr("test-token")))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/discovery-questionnaire/source-files/extract",
+            files={"file": ("brief.txt", b"Datum Engine project brief", "text/plain")},
+            headers={"Authorization": "Bearer test-token"},
+        )
 
-    result = await extract_source_file(upload)
+    assert response.status_code == 200
+    result = type("Extracted", (), response.json())()
 
     assert result.type == "attachment"
     assert result.text == "Datum Engine project brief"
@@ -23,21 +28,24 @@ async def test_extract_source_file_returns_text_for_small_txt_upload() -> None:
 
 @pytest.mark.asyncio
 async def test_extract_source_file_rejects_unsupported_upload() -> None:
-    upload = UploadFile(filename="brief.exe", file=BytesIO(b"not a document"))
-
-    with pytest.raises(HTTPException) as error:
-        await extract_source_file(upload)
-
-    assert error.value.status_code == 422
+    app = create_application(Settings(datum_engine_api_auth_token=SecretStr("test-token")))
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/discovery-questionnaire/source-files/extract",
+            files={"file": ("brief.exe", b"not a document", "application/octet-stream")},
+            headers={"Authorization": "Bearer test-token"},
+        )
+    assert response.status_code == 422
 
 
 def test_extraction_http_endpoint_accepts_a_text_file() -> None:
-    app = create_application(Settings())
+    app = create_application(Settings(datum_engine_api_auth_token=SecretStr("test-token")))
 
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/discovery-questionnaire/source-files/extract",
             files={"file": ("brief.txt", b"Ready for extraction", "text/plain")},
+            headers={"Authorization": "Bearer test-token"},
         )
 
     assert response.status_code == 200

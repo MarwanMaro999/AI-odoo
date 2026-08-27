@@ -54,6 +54,8 @@ graph TD
 - Idempotency protection.
 - Downloadable PDF output.
 - Safe error responses that do not expose prompts, instructions, or API keys.
+- Shared Odoo chatter AI: mention `@ai` in a Log Note, then use normal
+  chat or `/question`, `/strs`, and `/sow`.
 
 ## Project Structure
 
@@ -112,8 +114,9 @@ Copy `.env.example` to `.env`, then configure it. Keep real secrets only in `.en
 REGISTRY_PATH=C:\tmp\datum-engine-registry
 
 GROQ_API_KEY=your_groq_key
-GROQ_MODEL=openai/gpt-oss-20b
+GROQ_MODEL=groq/compound
 GROQ_RESEARCH_MODEL=groq/compound
+DATUM_ENGINE_API_AUTH_TOKEN=a-long-random-shared-secret
 DEV_OUTPUT_DIR=./.runtime/outputs
 ```
 
@@ -141,6 +144,25 @@ uvicorn src.main:app --reload
 ```
 
 Swagger UI is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+### Odoo shared chatter AI
+
+Set the same token in Odoo's `datum_engine.api_auth_token` system parameter,
+set `datum_engine.service_url` to this service, and set
+`datum_engine.context_user_id` to the elevated service user used for context
+collection. The integration deliberately uses that account's access, so enable
+it only after reviewing the data-exposure implications.
+
+Upgrade the existing `datum_engine` addon after deployment. It creates a
+technical **AI** contact, not a login user. On any record with chatter, select
+`@ai` in **Log Note** and add an ordinary request or one of:
+
+- `/question` for discovery questions;
+- `/strs` after a successful question run;
+- `/sow` after successful question and StRS runs.
+
+The Odoo cron posts the response back to the same shared Log Note thread. It
+does not subscribe or notify the bot contact.
 
 ---
 

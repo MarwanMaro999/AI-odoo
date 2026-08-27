@@ -14,6 +14,7 @@ from src.discovery_questionnaire.dependencies import (
     create_questionnaire_container,
 )
 from src.engine.dependencies import create_engine_container
+from src.chatter_ai.dependencies import create_chatter_ai_container
 
 
 def create_application(settings: Settings | None = None) -> FastAPI:
@@ -25,8 +26,10 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         await application.state.questionnaire_container.queue.start()
         await application.state.engine_container.queue.start()
+        await application.state.chatter_ai_container.queue.start()
         yield
         await application.state.engine_container.queue.stop()
+        await application.state.chatter_ai_container.queue.stop()
         await application.state.questionnaire_container.queue.stop()
 
     application = FastAPI(
@@ -39,6 +42,7 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     application.state.settings = settings
     application.state.questionnaire_container = create_questionnaire_container(settings)
     application.state.engine_container = create_engine_container(settings)
+    application.state.chatter_ai_container = create_chatter_ai_container(settings)
     register_exception_handlers(application)
 
     @application.get("/health", include_in_schema=False)

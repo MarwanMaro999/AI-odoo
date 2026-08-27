@@ -120,7 +120,7 @@ def test_sow_quality_gate_rejects_missing_acceptance_section() -> None:
 
 
 def test_missing_provider_fails_instead_of_returning_demo_document(tmp_path: Path) -> None:
-    orchestrator = DatumOrchestrator(
+    assert DatumOrchestrator(
         PersistentRunRepository(tmp_path / "state"),
         SimpleNamespace(),
         DatumDocxRenderer(tmp_path / "outputs"),

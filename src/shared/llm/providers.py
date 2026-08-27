@@ -8,15 +8,21 @@ from src.core.exceptions import QuestionnaireProviderUnavailable
 from src.core.logging import get_logger
 from src.shared.llm.contracts import GeneratedText, TextGenerator
 
+
 class GroqTextGenerator:
     """Generate questionnaire content with Groq GPT-OSS."""
 
     _max_generation_attempts = 3
 
-    def __init__(self, settings: Settings, structured_output: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        structured_output: bool = False,
+        max_completion_tokens: int | None = None,
+    ) -> None:
         self._api_key = settings.groq_api_key
         self._model_name = settings.groq_model
-        self._max_completion_tokens = settings.groq_max_completion_tokens
+        self._max_completion_tokens = max_completion_tokens or settings.groq_max_completion_tokens
         self._timeout_seconds = settings.groq_timeout_seconds
         self._structured_output = structured_output
         self._logger = get_logger()
@@ -41,11 +47,14 @@ class GroqTextGenerator:
                     "model": self._model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": self._max_completion_tokens,
-                    "extra_body": {
+                }
+                # These controls are specific to Groq's GPT-OSS models.
+                # Compound rejects them, so send only portable chat settings.
+                if self._model_name.startswith("openai/gpt-oss"):
+                    request_arguments["extra_body"] = {
                         "reasoning_effort": "low",
                         "include_reasoning": False,
-                    },
-                }
+                    }
                 if use_json_mode:
                     request_arguments["response_format"] = {"type": "json_object"}
                 return client.chat.completions.create(**request_arguments)

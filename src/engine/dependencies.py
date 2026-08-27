@@ -6,7 +6,7 @@ from src.core.config import Settings
 from src.engine.registry import SkillRegistry
 from src.engine.prompt_registry import PromptRegistry
 from src.engine.service import DatumDocxRenderer, DatumOrchestrator, EngineService, InProcessRunQueue, PersistentRunRepository
-from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator, HuggingFaceTextGenerator, OpenAITextGenerator
+from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator, HuggingFaceTextGenerator
 from src.shared.web_research.research_service import CompanyResearchService
 
 
@@ -28,7 +28,6 @@ def create_engine_container(settings: Settings) -> EngineContainer:
         settings.run_max_attempts,
         CompanyResearchService(settings),
         FallbackTextGenerator([
-            OpenAITextGenerator(settings, structured_output=True),
             GroqTextGenerator(settings, structured_output=True),
             HuggingFaceTextGenerator(settings, structured_output=True),
         ]),

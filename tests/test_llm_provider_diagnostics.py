@@ -1,9 +1,8 @@
 from types import SimpleNamespace
 
-from src.core.config import Settings
 from src.core.exceptions import QuestionnaireProviderUnavailable
 from src.shared.llm.contracts import GeneratedText
-from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator, OpenAITextGenerator
+from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator
 
 
 def test_provider_failure_diagnostics_include_safe_tpm_numbers() -> None:
@@ -40,16 +39,3 @@ def test_fallback_uses_second_provider_after_primary_failure() -> None:
 
     result = __import__("asyncio").run(FallbackTextGenerator([Unavailable(), Available()]).generate("test"))
     assert result.provider == "huggingface"
-
-
-def test_openai_unconfigured_provider_yields_to_a_fallback() -> None:
-    class Available:
-        async def generate(self, _: str) -> GeneratedText:
-            return GeneratedText(text="{}", provider="fallback", model="test")
-
-    generator = FallbackTextGenerator([
-        OpenAITextGenerator(Settings(openai_api_key=None)),
-        Available(),
-    ])
-    result = __import__("asyncio").run(generator.generate("test"))
-    assert result.provider == "fallback"

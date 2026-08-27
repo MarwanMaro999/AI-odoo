@@ -20,6 +20,7 @@ from src.discovery_questionnaire.schemas.response import (
 )
 from src.discovery_questionnaire.services.questionnaire_service import QuestionnaireService
 from src.core.config import get_settings
+from src.core.security import require_engine_token
 from src.shared.document_processing.text_extractor import UnsupportedDocumentError, extract_text
 
 router = APIRouter(prefix="/discovery-questionnaire", tags=["discovery-questionnaire"])
@@ -60,7 +61,10 @@ async def get_questionnaire_configuration(
 
 
 @router.post("/source-files/extract", response_model=QuestionnaireSource)
-async def extract_source_file(file: UploadFile = File(...)) -> QuestionnaireSource:
+async def extract_source_file(
+    file: UploadFile = File(...),
+    _: None = Depends(require_engine_token),
+) -> QuestionnaireSource:
     """Extract a bounded source file without blocking FastAPI's event loop."""
     content = await file.read()
     settings = get_settings()

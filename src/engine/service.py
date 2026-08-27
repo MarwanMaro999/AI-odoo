@@ -91,7 +91,21 @@ class PersistentRunRepository:
     def get(self, run_id: UUID) -> StoredRun:
         with self._lock:
             if run_id not in self._runs:
-                raise KeyError("run_not_found")
+                path = self._state_directory / f"{run_id}.json"
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    status = RunStatus.model_validate(payload["status"])
+                    request = StartRunRequest.model_validate(payload["request"])
+                    run = StoredRun(
+                        status,
+                        request,
+                        payload["fingerprint"],
+                        [RunLogEntry.model_validate(item) for item in payload.get("logs", [])],
+                    )
+                except (OSError, KeyError, ValueError) as error:
+                    raise KeyError("run_not_found") from error
+                self._runs[status.run_id] = run
+                self._keys[request.idempotency_key] = status.run_id
             return self._runs[run_id]
 
     def save(self, run: StoredRun) -> None:
@@ -194,6 +208,51 @@ class DatumDocxRenderer:
             encoding="utf-8",
         )
         return path
+
+    def render_markdown(self, run_id: UUID, document_type: str, markdown: str, output_key: str = "document") -> Path:
+        """Render a Chatter document reply as a downloadable Word artifact."""
+        sections: list[tuple[str, list[str]]] = []
+        title = self._title_for(document_type)
+        paragraphs: list[str] = []
+
+        def clean(value: str) -> str:
+            value = value.replace("<br>", "\n").replace("<br/>", "\n")
+            value = re.sub(r"`([^`]+)`", r"\1", value)
+            value = re.sub(r"\*\*(.*?)\*\*", r"\1", value)
+            value = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", value)
+            return re.sub(r"\s+", " ", value).strip(" :-")
+
+        def add_section(section_title: str, values: list[str]) -> None:
+            nonlocal title, paragraphs
+            cleaned_values = [clean(value) for value in values if clean(value)]
+            if title and paragraphs:
+                sections.append((title, paragraphs))
+            title = clean(section_title) or self._title_for(document_type)
+            paragraphs = cleaned_values
+
+        for raw_line in markdown.splitlines():
+            line = raw_line.strip()
+            if not line or line == "---":
+                continue
+            if line.startswith("|") and line.endswith("|"):
+                cells = [cell.strip() for cell in line.strip("|").split("|")]
+                if len(cells) >= 2 and not all(re.fullmatch(r"[-: ]+", cell) for cell in cells):
+                    add_section(cells[0], cells[1].split("\n"))
+                continue
+            heading = re.match(r"^#{1,6}\s+(.+)$", line)
+            if heading:
+                add_section(heading.group(1), [])
+                continue
+            bold_heading = re.fullmatch(r"\*\*(.+?)\*\*:?", line)
+            if bold_heading:
+                add_section(bold_heading.group(1), [])
+                continue
+            paragraphs.append(clean(re.sub(r"^(?:[-*]|\d+[.)])\s+", "", line)))
+        if paragraphs:
+            sections.append((title, paragraphs))
+        if not sections:
+            sections = [(self._title_for(document_type), ["No content was returned by the AI."])]
+        return self.render(run_id, document_type, sections, output_key)
 
     @staticmethod
     def _title_for(document_type: str) -> str:
