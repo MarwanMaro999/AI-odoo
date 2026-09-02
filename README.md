@@ -6,7 +6,10 @@
 
 **Datum Engine** is OdooTec's internal asynchronous AI document-execution service. Odoo owns engagements, source revisions, approvals, document versions, findings, and review cycles; FastAPI executes versioned skills and returns validated document/review outputs.
 
-This version runs locally: FastAPI keeps a small local queue and JSON run records, while Odoo remains the internal user interface and document system of record. No PostgreSQL, Redis, Docker, or separate worker service is required.
+FastAPI uses Neon PostgreSQL for persistent AI sessions, review findings,
+clarifications, and durable jobs. Odoo remains the internal user interface and
+document system of record. The FastAPI worker runs in the application process;
+Redis is not required.
 
 ---
 
@@ -140,10 +143,8 @@ instruction: Create an evidence-based Arabic and English discovery questionnaire
 ### 4. Run the API
 
 ```powershell
-uvicorn src.main:app --reload
+uvicorn src.main:app --reload --port 5001
 ```
-
-Swagger UI is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
 
 ### Odoo shared chatter AI
 
@@ -171,7 +172,7 @@ does not subscribe or notify the bot contact.
 Base URL:
 
 ```text
-http://127.0.0.1:8000/api/v1
+http://127.0.0.1:5001/api/v1
 ```
 
 ### Check questionnaire configuration
@@ -249,8 +250,8 @@ The test suite covers configuration safety, idempotency, run state, provider fal
 
 ## Development Notes
 
-- Local mode is for development only; it has no durable job queue or database.
-- The current setup is local-only: FastAPI and Odoo run on the same internal machine or network, with local background workers and JSON run-state files.
+- Neon is required for durable sessions, jobs, review cycles, findings, and clarification answers. Run Alembic migrations before starting FastAPI.
+- FastAPI and its worker must run on an always-on server for work to continue while users close Odoo or their browser. If that host is powered off, processing resumes only when it returns.
 - Generated output requires retention and backup management through the deployment volume or production object store.
 
 ---

@@ -1,8 +1,11 @@
 from types import SimpleNamespace
 
+from src.core.config import Settings
 from src.core.exceptions import QuestionnaireProviderUnavailable
+from src.core.model_profiles import ModelResponsibility
 from src.shared.llm.contracts import GeneratedText
 from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator
+from src.shared.llm.runtime import build_runtime_model_router
 
 
 def test_provider_failure_diagnostics_include_safe_tpm_numbers() -> None:
@@ -39,3 +42,30 @@ def test_fallback_uses_second_provider_after_primary_failure() -> None:
 
     result = __import__("asyncio").run(FallbackTextGenerator([Unavailable(), Available()]).generate("test"))
     assert result.provider == "huggingface"
+
+
+def test_hugging_face_automatic_fallback_is_disabled() -> None:
+    settings = Settings()
+
+    assert not settings.hf_automatic_fallback_enabled
+    assert settings.hf_model == "meta-llama/Llama-3.3-70B-Instruct"
+    assert "qwen" not in settings.hf_model.lower()
+
+
+def test_generation_wiring_uses_qwen_38_then_qwen_36() -> None:
+    router = build_runtime_model_router(Settings(), structured_generation=True)
+
+    assert isinstance(router._generators[ModelResponsibility.ENGLISH_GENERATION], GroqTextGenerator)
+    assert router._profiles[ModelResponsibility.ENGLISH_GENERATION].model == "qwen/qwen3.8-27b"
+    assert isinstance(router._fallback_generators[ModelResponsibility.ENGLISH_GENERATION], GroqTextGenerator)
+    assert router._fallback_profiles[ModelResponsibility.ENGLISH_GENERATION].model == "qwen/qwen3.6-27b"
+    assert router._fallback_profiles[ModelResponsibility.STRUCTURED_REVIEW].model == "qwen/qwen3.6-27b"
+
+
+def test_generation_wiring_can_disable_the_fallback_explicitly() -> None:
+    router = build_runtime_model_router(Settings(
+        ai_generation_fallback_enabled=False,
+        ai_review_fallback_enabled=False,
+    ))
+
+    assert router._fallback_generators == {}

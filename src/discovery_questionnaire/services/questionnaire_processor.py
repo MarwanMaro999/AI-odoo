@@ -3,6 +3,7 @@
 from uuid import UUID, uuid4
 
 from src.core.logging import get_logger
+from src.core.prompt_security import PromptSecurityGate
 from src.discovery_questionnaire.repositories.run_repository import (
     InMemoryQuestionnaireRunRepository,
     StoredQuestionnaireRun,
@@ -25,12 +26,14 @@ class QuestionnaireProcessor:
         generator: TextGenerator,
         research: CompanyResearchService,
         renderer: QuestionnairePdfRenderer,
+        security_gate: PromptSecurityGate | None = None,
     ) -> None:
         self._repository = repository
         self._registry = registry
         self._generator = generator
         self._research = research
         self._renderer = renderer
+        self._security_gate = security_gate
         self._logger = get_logger()
 
     async def process(self, questionnaire_run_id: UUID) -> None:
@@ -38,10 +41,11 @@ class QuestionnaireProcessor:
         run = self._repository.mark_running(questionnaire_run_id)
         try:
             configuration = self._registry.load(run.questionnaire_identifier)
-            research_text = await self._get_research(run)
+            request = await self._secure_request(run.request)
+            research_text = await self._get_research(run, request)
             generated = await self._generator.generate(
                 self._build_prompt(
-                    run.request,
+                    request,
                     configuration.instruction,
                     research_text,
                     configuration.questions_per_section,
@@ -67,8 +71,7 @@ class QuestionnaireProcessor:
             )
             self._repository.mark_failed(questionnaire_run_id, failure_code)
 
-    async def _get_research(self, run: StoredQuestionnaireRun) -> str:
-        request = run.request
+    async def _get_research(self, run: StoredQuestionnaireRun, request: StartQuestionnaireRequest) -> str:
         if not request.options.web_research_enabled:
             return ""
         customer = request.customer
@@ -76,7 +79,27 @@ class QuestionnaireProcessor:
             value for value in [customer.name, customer.industry, customer.country, str(customer.website or "")] if value
         )
         result = await self._research.research(query)
-        return result.text if result else ""
+        text = result.text if result else ""
+        if text and self._security_gate is not None:
+            # Public research is also untrusted source data and can contain
+            # copied instructions from an arbitrary website.
+            await self._security_gate.require_safe_text(text, "web-research", "web_research")
+        return text
+
+    async def _secure_request(self, request: StartQuestionnaireRequest) -> StartQuestionnaireRequest:
+        if self._security_gate is None:
+            return request
+        source_material = await self._security_gate.filter_model_sources(request.source_material)
+        customer_text = "\n".join(filter(None, (
+            request.customer.name,
+            str(request.customer.website or ""),
+            request.customer.industry or "",
+            request.customer.country or "",
+            request.customer.notes or "",
+        )))
+        if customer_text:
+            await self._security_gate.require_safe_text(customer_text, "customer", "customer_information")
+        return request.model_copy(update={"source_material": source_material})
 
     @staticmethod
     def _build_prompt(

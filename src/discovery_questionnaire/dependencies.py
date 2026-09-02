@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from fastapi import Request
 
 from src.core.config import Settings
+from src.core.prompt_security import GroqPromptInjectionScanner, PromptSecurityGate
 from src.discovery_questionnaire.repositories.run_repository import (
     InMemoryQuestionnaireRunRepository,
 )
@@ -13,7 +14,8 @@ from src.discovery_questionnaire.services.questionnaire_registry import (
 )
 from src.discovery_questionnaire.services.questionnaire_service import QuestionnaireService
 from src.discovery_questionnaire.services.questionnaire_processor import QuestionnaireProcessor
-from src.shared.llm.providers import FallbackTextGenerator, GroqTextGenerator, HuggingFaceTextGenerator
+from src.core.model_profiles import ModelResponsibility
+from src.shared.llm.runtime import build_runtime_model_router
 from src.shared.queue.in_memory_queue import InMemoryRunQueue
 from src.shared.rendering.questionnaire_pdf_renderer import QuestionnairePdfRenderer
 from src.shared.web_research.research_service import CompanyResearchService
@@ -34,19 +36,15 @@ def create_questionnaire_container(settings: Settings) -> QuestionnaireContainer
     processor = QuestionnaireProcessor(
         repository=repository,
         registry=registry,
-        generator=FallbackTextGenerator([
-            GroqTextGenerator(settings),
-            HuggingFaceTextGenerator(settings),
-        ]),
+        generator=build_runtime_model_router(settings).bind(ModelResponsibility.ENGLISH_GENERATION),
         research=CompanyResearchService(settings),
         renderer=QuestionnairePdfRenderer(settings.dev_output_dir),
+        security_gate=PromptSecurityGate(GroqPromptInjectionScanner(settings)),
     )
     queue = InMemoryRunQueue(processor.process, settings.worker_concurrency)
     return QuestionnaireContainer(
         service=QuestionnaireService(repository, registry, queue, settings.dev_output_dir), queue=queue
     )
-
-
 def get_questionnaire_service(request: Request) -> QuestionnaireService:
     """Retrieve the application-wide questionnaire service for a controller call."""
     return request.app.state.questionnaire_container.service

@@ -1,5 +1,6 @@
 """Focused tests for the Odoo chatter AI FastAPI contract."""
 
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -7,7 +8,9 @@ from pydantic import SecretStr
 
 from src.chatter_ai.schemas import ChatCommand, ChatterAIStartRequest, ContextUnit
 from src.chatter_ai.service import ChatProvider, ChatRunRepository, ChatterAIOrchestrator
+from src.chatter_ai.sessions import PreparedChatterSession, ReservedChatterSession
 from src.core.config import Settings
+from src.core.prompt_security import PromptSecurityRejected
 from src.engine.service import DatumDocxRenderer
 from src.main import create_application
 from src.shared.llm.contracts import GeneratedText
@@ -45,6 +48,68 @@ class _Unavailable:
         raise QuestionnaireProviderUnavailable("rate limit reached")
 
 
+class _SessionStoreStub:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.session_id = __import__("uuid").uuid4()
+
+    async def reserve(self, _request: ChatterAIStartRequest) -> ReservedChatterSession:
+        self.calls += 1
+        return ReservedChatterSession(self.session_id, self.calls == 1)
+
+    async def prepare(self, request: ChatterAIStartRequest) -> PreparedChatterSession:
+        return PreparedChatterSession(self.session_id, False, request.context)
+
+
+class _UsageStoreStub:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def record_assistant_turn(self, *args) -> None:
+        self.calls.append(args)
+
+
+class _BrokenUsageStoreStub:
+    async def record_assistant_turn(self, *_args) -> None:
+        raise ValueError("telemetry failure")
+
+
+class _RejectingSessionStoreStub:
+    async def reserve(self, _: ChatterAIStartRequest) -> ReservedChatterSession:
+        raise PromptSecurityRejected(())
+
+    async def prepare(self, _: ChatterAIStartRequest) -> PreparedChatterSession:
+        raise PromptSecurityRejected(())
+
+
+class _QueueStub:
+    def __init__(self) -> None:
+        self.run_ids = []
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def enqueue(self, run_id) -> None:
+        self.run_ids.append(run_id)
+
+
+def _replace_chatter_queue(app) -> _QueueStub:
+    queue = _QueueStub()
+    container = app.state.chatter_ai_container
+    app.state.chatter_ai_container = replace(container, queue=queue)
+    container.service._queue = queue
+    return queue
+
+
+def _replace_engine_queue(app) -> _QueueStub:
+    queue = _QueueStub()
+    app.state.engine_container = replace(app.state.engine_container, queue=queue)
+    return queue
+
+
 def test_chatter_run_falls_back_to_next_provider(tmp_path: Path) -> None:
     repository = ChatRunRepository(tmp_path)
     run, _ = repository.create_or_get(_request())
@@ -63,17 +128,86 @@ def test_chatter_run_falls_back_to_next_provider(tmp_path: Path) -> None:
     assert [item.outcome for item in status.provider_attempts] == ["failed", "succeeded"]
 
 
+def test_chatter_run_records_provider_token_usage_when_a_session_is_available(tmp_path: Path) -> None:
+    import asyncio
+
+    class _UsageAvailable(_Available):
+        async def generate(self, prompt: str) -> GeneratedText:
+            response = await super().generate(prompt)
+            return GeneratedText(response.text, response.provider, response.model, 123, 45)
+
+    repository = ChatRunRepository(tmp_path)
+    run, _ = repository.create_or_get(_request(ChatCommand.QUESTION), __import__("uuid").uuid4())
+    usage_store = _UsageStoreStub()
+    orchestrator = ChatterAIOrchestrator(
+        repository,
+        [ChatProvider("test", _UsageAvailable(), 100_000)],
+        DatumDocxRenderer(tmp_path / "outputs"),
+        sessions=usage_store,
+    )
+
+    asyncio.run(orchestrator.process(run.status.run_id))
+
+    status = repository.get(run.status.run_id).status
+    assert (status.input_tokens, status.output_tokens) == (123, 45)
+    assert len(usage_store.calls) == 1
+    assert usage_store.calls[0][-1] == 1
+
+
+def test_chatter_run_completes_when_session_telemetry_fails(tmp_path: Path) -> None:
+    import asyncio
+
+    repository = ChatRunRepository(tmp_path)
+    run, _ = repository.create_or_get(_request(ChatCommand.QUESTION), __import__("uuid").uuid4())
+    orchestrator = ChatterAIOrchestrator(
+        repository,
+        [ChatProvider("test", _Available(), 100_000)],
+        DatumDocxRenderer(tmp_path / "outputs"),
+        sessions=_BrokenUsageStoreStub(),
+    )
+
+    asyncio.run(orchestrator.process(run.status.run_id))
+
+    status = repository.get(run.status.run_id).status
+    assert status.state == "succeeded"
+    assert status.artifact_filename
+
+
 def test_chatter_api_requires_bearer_token() -> None:
     app = create_application(Settings(datum_engine_api_auth_token=SecretStr("test-token")))
+    session_store = _SessionStoreStub()
+    app.state.chatter_ai_container.service._sessions = session_store
+    _replace_chatter_queue(app)
+    _replace_engine_queue(app)
+    idempotency_key = "api-session-test-%s" % __import__("uuid").uuid4()
     with TestClient(app) as client:
         unauthorized = client.post("/api/v1/chatter-ai/runs", json=_request().model_dump(mode="json"))
         authorized = client.post(
             "/api/v1/chatter-ai/runs",
-            json=_request().model_dump(mode="json"),
+            json=_request().model_copy(update={"idempotency_key": idempotency_key}).model_dump(mode="json"),
             headers={"Authorization": "Bearer test-token"},
         )
     assert unauthorized.status_code == 401
     assert authorized.status_code == 202
+    assert authorized.json()["session_id"] == str(session_store.session_id)
+
+
+def test_chatter_api_returns_safe_validation_error_for_rejected_instructions() -> None:
+    app = create_application(Settings(datum_engine_api_auth_token=SecretStr("test-token")))
+    app.state.chatter_ai_container.service._sessions = _RejectingSessionStoreStub()
+    _replace_chatter_queue(app)
+    _replace_engine_queue(app)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chatter-ai/runs",
+            json=_request().model_copy(update={
+                "idempotency_key": "security-reject-%s" % __import__("uuid").uuid4(),
+            }).model_dump(mode="json"),
+            headers={"Authorization": "Bearer test-token"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Unsafe AI instructions were rejected"
 
 
 def test_fallback_context_mentions_every_source() -> None:

@@ -18,8 +18,10 @@ from src.chatter_ai.schemas import (
 )
 from src.core.exceptions import QuestionnaireProviderUnavailable
 from src.core.logging import get_logger
+from src.core.prompt_security import PromptSecurityRejected
 from src.engine.service import DatumDocxRenderer
 from src.shared.llm.contracts import TextGenerator
+from src.chatter_ai.sessions import ChatterSessionStore, ChatterSessionUnavailable
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,11 @@ class ChatRunRepository:
             "fingerprint": run.fingerprint,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def create_or_get(self, request: ChatterAIStartRequest) -> tuple[StoredChatRun, bool]:
+    def create_or_get(
+        self,
+        request: ChatterAIStartRequest,
+        session_id: UUID | None = None,
+    ) -> tuple[StoredChatRun, bool]:
         fingerprint = hashlib.sha256(json.dumps(request.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
         with self._lock:
             existing_id = self._keys.get(request.idempotency_key)
@@ -76,7 +82,7 @@ class ChatRunRepository:
                 return existing, False
             status = ChatterAIRunStatus(
                 run_id=uuid4(), state=ChatRunState.QUEUED, command=request.command,
-                submitted_at=datetime.now(timezone.utc),
+                submitted_at=datetime.now(timezone.utc), session_id=session_id,
             )
             run = StoredChatRun(status, request, fingerprint)
             self._runs[status.run_id] = run
@@ -99,9 +105,23 @@ class ChatRunRepository:
                 self._keys[request.idempotency_key] = status.run_id
             return self._runs[run_id]
 
+    def find_by_idempotency_key(self, idempotency_key: str) -> StoredChatRun | None:
+        with self._lock:
+            run_id = self._keys.get(idempotency_key)
+            return self._runs.get(run_id) if run_id else None
+
     def save(self, run: StoredChatRun) -> None:
         with self._lock:
             self._save(run)
+
+    def active_run_ids(self) -> list[UUID]:
+        """Return unfinished runs so their durable job can be restored."""
+        with self._lock:
+            return [
+                run_id
+                for run_id, run in self._runs.items()
+                if run.status.state in {ChatRunState.QUEUED, ChatRunState.RUNNING}
+            ]
 
 
 class ChatterAIOrchestrator:
@@ -111,10 +131,12 @@ class ChatterAIOrchestrator:
         providers: list[ChatProvider],
         renderer: DatumDocxRenderer,
         completion_callback: CompletionCallback | None = None,
+        sessions: ChatterSessionStore | None = None,
     ) -> None:
         self._repository = repository
         self._providers = providers
         self._renderer = renderer
+        self._sessions = sessions
         self._completion_callback = completion_callback
 
     async def process(self, run_id: UUID) -> None:
@@ -124,6 +146,44 @@ class ChatterAIOrchestrator:
         run.status.state = ChatRunState.RUNNING
         run.status.started_at = datetime.now(timezone.utc)
         self._repository.save(run)
+        get_logger().info(
+            "chatter_ai_processing_started",
+            run_id=str(run_id),
+            command=run.request.command.value,
+            context_source_count=len(run.request.context),
+        )
+        preparer = getattr(self._sessions, "prepare", None)
+        if preparer is not None:
+            try:
+                prepared = await preparer(run.request)
+                run.request = run.request.model_copy(update={
+                    "session_id": prepared.session_id,
+                    "context": prepared.context,
+                })
+                run.status.session_id = prepared.session_id
+                self._repository.save(run)
+                get_logger().info(
+                    "chatter_ai_context_prepared",
+                    run_id=str(run_id),
+                    context_source_count=len(prepared.context),
+                )
+            except PromptSecurityRejected:
+                await self._fail_before_generation(
+                    run, "unsafe_ai_instructions", "Unsafe AI instructions were rejected.",
+                )
+                return
+            except (ChatterSessionUnavailable, ValueError) as error:
+                failure_code = (
+                    "ai_session_baseline_required"
+                    if isinstance(error, ValueError)
+                    and str(error) == "ai_session_baseline_required"
+                    else "context_preparation_failed"
+                )
+                await self._fail_before_generation(
+                    run, failure_code, "Datum AI could not prepare the request context.",
+                    error_type=type(error).__name__,
+                )
+                return
         for provider in self._providers_for(run.request):
             try:
                 prompt = self._build_prompt(run.request, provider.max_context_bytes)
@@ -133,25 +193,98 @@ class ChatterAIOrchestrator:
                 self._create_artifact(run)
                 run.status.provider = result.provider
                 run.status.model = result.model
+                run.status.input_tokens = result.input_tokens
+                run.status.output_tokens = result.output_tokens
+                run.status.context_source_count = len(run.request.context)
+                if self._sessions is not None:
+                    try:
+                        await self._sessions.record_assistant_turn(
+                            run.status.session_id,
+                            run.status.run_id,
+                            result,
+                            prompt,
+                            len(run.request.context),
+                        )
+                    except ChatterSessionUnavailable:
+                        # The generated result is still valid.  Do not call a
+                        # provider a second time merely because telemetry could
+                        # not be recorded; the next user request can retry DB I/O.
+                        get_logger().exception("chatter_ai_usage_recording_failed", run_id=str(run_id))
+                    except Exception:
+                        # A post-generation persistence issue must never leave
+                        # an already generated document in a permanent queued
+                        # state.  The durable run is completed and Odoo can
+                        # receive the file; session telemetry may be repaired
+                        # independently on the next interaction.
+                        get_logger().exception("chatter_ai_session_recording_crashed", run_id=str(run_id))
                 run.status.provider_attempts.append(ProviderAttempt(provider=provider.name, outcome="succeeded"))
                 run.status.completed_at = datetime.now(timezone.utc)
                 self._repository.save(run)
+                get_logger().info(
+                    "chatter_ai_processing_succeeded",
+                    run_id=str(run_id),
+                    command=run.request.command.value,
+                    provider=result.provider,
+                    artifact_created=bool(run.status.artifact_filename),
+                )
                 await self._notify_completion(run)
                 return
             except QuestionnaireProviderUnavailable as error:
                 run.status.provider_attempts.append(ProviderAttempt(
                     provider=provider.name, outcome="failed", reason=self._safe_reason(str(error)),
                 ))
-            except Exception:
+                get_logger().warning(
+                    "chatter_ai_provider_unavailable",
+                    run_id=str(run_id),
+                    command=run.request.command.value,
+                    provider=provider.name,
+                )
+            except Exception as error:
                 run.status.provider_attempts.append(ProviderAttempt(
                     provider=provider.name, outcome="failed", reason="provider request failed",
                 ))
+                get_logger().warning(
+                    "chatter_ai_provider_failed",
+                    run_id=str(run_id),
+                    command=run.request.command.value,
+                    provider=provider.name,
+                    error_type=type(error).__name__,
+                )
         run.status.state = ChatRunState.FAILED
         run.status.failure_code = "all_providers_unavailable"
         attempted = ", ".join(item.provider for item in run.status.provider_attempts) or "no configured provider"
         run.status.failure_message = f"AI could not reply because {attempted} were unavailable, rate-limited, or not configured. Please retry later."
         run.status.completed_at = datetime.now(timezone.utc)
         self._repository.save(run)
+        get_logger().error(
+            "chatter_ai_processing_failed",
+            run_id=str(run_id),
+            command=run.request.command.value,
+            failure_code=run.status.failure_code,
+            provider_count=len(run.status.provider_attempts),
+        )
+        await self._notify_completion(run)
+
+    async def _fail_before_generation(
+        self,
+        run: StoredChatRun,
+        failure_code: str,
+        failure_message: str,
+        *,
+        error_type: str | None = None,
+    ) -> None:
+        run.status.state = ChatRunState.FAILED
+        run.status.failure_code = failure_code
+        run.status.failure_message = failure_message
+        run.status.completed_at = datetime.now(timezone.utc)
+        self._repository.save(run)
+        get_logger().error(
+            "chatter_ai_context_preparation_failed",
+            run_id=str(run.status.run_id),
+            command=run.request.command.value,
+            failure_code=failure_code,
+            error_type=error_type,
+        )
         await self._notify_completion(run)
 
     def _providers_for(self, request: ChatterAIStartRequest) -> list[ChatProvider]:
@@ -319,14 +452,49 @@ class ChatterAIOrchestrator:
 
 
 class ChatterAIService:
-    def __init__(self, repository: ChatRunRepository, queue: object) -> None:
+    def __init__(self, repository: ChatRunRepository, queue: object, sessions: ChatterSessionStore) -> None:
         self._repository = repository
         self._queue = queue
+        self._sessions = sessions
 
     async def start(self, request: ChatterAIStartRequest) -> ChatterAIRunStatus:
-        run, created = self._repository.create_or_get(request)
+        existing = self._repository.find_by_idempotency_key(request.idempotency_key)
+        if existing is not None:
+            recover = getattr(self._queue, "ensure_enqueued", None)
+            if existing.status.state in {ChatRunState.QUEUED, ChatRunState.RUNNING} and recover is not None:
+                await recover(existing.status.run_id)
+            get_logger().info(
+                "chatter_ai_idempotent_replay",
+                run_id=str(existing.status.run_id),
+                command=request.command.value,
+                state=existing.status.state.value,
+            )
+            return existing.status
+        reserver = getattr(self._sessions, "reserve", None)
+        if reserver is None:
+            # Compatibility for lightweight adapters created before session
+            # reservation was split from context preparation. Production uses
+            # ``reserve`` and never performs this expensive path in HTTP.
+            prepared = await self._sessions.prepare(request)
+            prompt_request = request.model_copy(update={
+                "session_id": prepared.session_id,
+                "context": prepared.context,
+            })
+            session_id = prepared.session_id
+        else:
+            reserved = await reserver(request)
+            prompt_request = request.model_copy(update={"session_id": reserved.session_id})
+            session_id = reserved.session_id
+        run, created = self._repository.create_or_get(prompt_request, session_id)
         if created:
             await self._queue.enqueue(run.status.run_id)
+            get_logger().info(
+                "chatter_ai_queued",
+                run_id=str(run.status.run_id),
+                command=request.command.value,
+                context_source_count=len(request.context),
+                context_mode=request.context_mode,
+            )
         return run.status
 
     def status(self, run_id: UUID) -> ChatterAIRunStatus:

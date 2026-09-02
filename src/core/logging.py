@@ -44,17 +44,22 @@ def _redact_mapping(values: Mapping[str, Any]) -> dict[str, Any]:
     return redacted
 
 
-def configure_logging(log_level: str = "INFO") -> None:
-    """Configure JSON logs with instruction and credential redaction."""
+def configure_logging(log_level: str = "INFO", log_format: str = "console") -> None:
+    """Configure safe machine JSON or readable developer-console logs."""
     resolved_log_level = getattr(logging, log_level.upper(), logging.INFO)
     logging.basicConfig(level=resolved_log_level, format="%(message)s")
+    renderer = (
+        structlog.processors.JSONRenderer()
+        if log_format == "json"
+        else structlog.dev.ConsoleRenderer(colors=False)
+    )
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             redact_private_fields,
-            structlog.processors.JSONRenderer(),
+            renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(resolved_log_level),
         logger_factory=structlog.PrintLoggerFactory(),

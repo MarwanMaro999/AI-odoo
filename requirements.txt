@@ -33,6 +33,12 @@ structlog==24.4.0
 # --- Env / config ---
 python-dotenv==1.0.1
 
+# --- Durable PostgreSQL storage ---
+SQLAlchemy[asyncio]>=2.0,<3
+psycopg[binary]>=3.2,<4
+alembic>=1.14,<2
+pgvector>=0.3,<1
+
 # --- Testing ---
 pytest==8.3.4
 pytest-asyncio==0.25.0

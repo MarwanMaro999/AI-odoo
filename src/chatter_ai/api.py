@@ -9,6 +9,8 @@ from mimetypes import guess_type
 from src.chatter_ai.dependencies import get_chatter_ai_service
 from src.chatter_ai.schemas import ChatterAIRunStatus, ChatterAIStartRequest
 from src.chatter_ai.service import ChatterAIService
+from src.chatter_ai.sessions import ChatterSessionUnavailable
+from src.core.prompt_security import PromptSecurityRejected
 from src.core.security import require_engine_token
 
 
@@ -19,8 +21,12 @@ router = APIRouter(prefix="/chatter-ai/runs", tags=["chatter-ai"], dependencies=
 async def start_run(payload: ChatterAIStartRequest, service: ChatterAIService = Depends(get_chatter_ai_service)) -> ChatterAIRunStatus:
     try:
         return await service.start(payload)
+    except PromptSecurityRejected as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsafe AI instructions were rejected") from error
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except ChatterSessionUnavailable as error:
+        raise HTTPException(status_code=503, detail="Durable AI session storage is unavailable") from error
 
 
 @router.get("/{run_id}", response_model=ChatterAIRunStatus)

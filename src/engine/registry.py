@@ -1,11 +1,15 @@
 """External opaque skill registry.  Prompt payloads never leave this service."""
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from src.engine.schemas import PublicSkillDefinition, SkillKind
+
+
+_logger = logging.getLogger(__name__)
 
 
 class SkillRegistryError(ValueError):
@@ -15,10 +19,29 @@ class SkillRegistryError(ValueError):
 class SkillRegistry:
     def __init__(self, registry_path: Path) -> None:
         self._registry_path = registry_path
+        # Log skill discovery at startup for diagnostics
+        if registry_path.is_dir():
+            discovered = []
+            for path in sorted(registry_path.glob("*.yaml")):
+                try:
+                    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict) and "identifier" in raw:
+                        discovered.append(f"{raw['identifier']} v{raw.get('version', '?')}")
+                except Exception:
+                    pass
+            _logger.info(
+                "datum_skill_registry_initialized registry_path=%s discovered_skills=%s",
+                registry_path,
+                ", ".join(discovered) or "(none)"
+            )
 
     def load(self, identifier: str, version: str) -> tuple[PublicSkillDefinition, dict[str, Any]]:
         path = self._registry_path / f"{identifier}.yaml"
         if not path.is_file():
+            _logger.error(
+                "datum_skill_not_found identifier=%s version=%s registry_path=%s",
+                identifier, version, self._registry_path
+            )
             raise SkillRegistryError("skill_not_found")
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):

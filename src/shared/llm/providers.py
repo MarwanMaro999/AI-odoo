@@ -2,9 +2,10 @@
 
 import asyncio
 import re
+from pydantic import SecretStr
 
 from src.core.config import Settings
-from src.core.exceptions import QuestionnaireProviderUnavailable
+from src.core.exceptions import QuestionnaireProviderRequestRejected, QuestionnaireProviderUnavailable
 from src.core.logging import get_logger
 from src.shared.llm.contracts import GeneratedText, TextGenerator
 
@@ -12,18 +13,23 @@ from src.shared.llm.contracts import GeneratedText, TextGenerator
 class GroqTextGenerator:
     """Generate questionnaire content with Groq GPT-OSS."""
 
-    _max_generation_attempts = 3
-
     def __init__(
         self,
         settings: Settings,
         structured_output: bool = False,
         max_completion_tokens: int | None = None,
+        model_name: str | None = None,
+        timeout_seconds: float | None = None,
+        max_generation_attempts: int | None = None,
+        api_key: SecretStr | None = None,
+        provider_label: str = "groq",
     ) -> None:
-        self._api_key = settings.groq_api_key
-        self._model_name = settings.groq_model
+        self._api_key = api_key or settings.groq_api_key
+        self._provider_label = provider_label
+        self._model_name = model_name or settings.groq_model
         self._max_completion_tokens = max_completion_tokens or settings.groq_max_completion_tokens
-        self._timeout_seconds = settings.groq_timeout_seconds
+        self._timeout_seconds = timeout_seconds or settings.groq_timeout_seconds
+        self._max_generation_attempts = max_generation_attempts or 3
         self._structured_output = structured_output
         self._logger = get_logger()
 
@@ -33,7 +39,7 @@ class GroqTextGenerator:
             raise QuestionnaireProviderUnavailable("Groq is not configured")
         request_bytes = len(prompt.encode("utf-8"))
 
-        def request() -> tuple[str, str | None]:
+        def request() -> tuple[str, str | None, int | None, int | None]:
             from groq import Groq
 
             client = Groq(
@@ -55,6 +61,11 @@ class GroqTextGenerator:
                         "reasoning_effort": "low",
                         "include_reasoning": False,
                     }
+                elif self._model_name.startswith("qwen/qwen3"):
+                    request_arguments["extra_body"] = {
+                        "reasoning_effort": "none",
+                        "include_reasoning": False,
+                    }
                 if use_json_mode:
                     request_arguments["response_format"] = {"type": "json_object"}
                 return client.chat.completions.create(**request_arguments)
@@ -70,12 +81,18 @@ class GroqTextGenerator:
                 else:
                     raise
             choice = response.choices[0]
-            return choice.message.content or "", choice.finish_reason
+            usage = response.usage
+            return (
+                choice.message.content or "",
+                choice.finish_reason,
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", None),
+            )
 
         last_error: Exception | None = None
         for attempt in range(1, self._max_generation_attempts + 1):
             try:
-                text, finish_reason = await asyncio.wait_for(
+                text, finish_reason, input_tokens, output_tokens = await asyncio.wait_for(
                     asyncio.to_thread(request), timeout=self._timeout_seconds + 5
                 )
             except Exception as error:
@@ -84,7 +101,7 @@ class GroqTextGenerator:
                 retry_after_seconds = self._retry_after_seconds(error) if diagnostics["http_status"] == 429 else None
                 self._logger.warning(
                     "llm_generation_attempt_failed",
-                    provider="groq",
+                    provider=self._provider_label,
                     attempt=attempt,
                     error_type=type(error).__name__,
                     **diagnostics,
@@ -92,16 +109,20 @@ class GroqTextGenerator:
                     retry_after_seconds=retry_after_seconds,
                 )
                 if diagnostics["http_status"] == 413:
-                    raise QuestionnaireProviderUnavailable("Groq request exceeds its current token limit") from error
+                    raise QuestionnaireProviderRequestRejected("Groq request exceeds its current token limit") from error
                 if diagnostics["http_status"] == 429:
-                    # A second provider can serve this run immediately. Retrying Groq
-                    # only burns time and can keep the shared TPM bucket exhausted.
+                    if retry_after_seconds and retry_after_seconds <= 3 and attempt < self._max_generation_attempts:
+                        await asyncio.sleep(retry_after_seconds)
+                        continue
                     raise QuestionnaireProviderUnavailable("Groq is rate limited") from error
+                if diagnostics["http_status"] in {401, 402, 403}:
+                    raise QuestionnaireProviderUnavailable("Groq account is not available") from error
                 continue
 
             if finish_reason != "length" and text.strip():
                 return GeneratedText(
-                    text=text.strip(), provider="groq", model=self._model_name
+                    text=text.strip(), provider=self._provider_label, model=self._model_name,
+                    input_tokens=input_tokens, output_tokens=output_tokens,
                 )
 
             last_error = ValueError(
@@ -111,7 +132,7 @@ class GroqTextGenerator:
             )
             self._logger.warning(
                 "llm_generation_attempt_incomplete",
-                provider="groq",
+                provider=self._provider_label,
                 attempt=attempt,
                 finish_reason=finish_reason,
                 content_received=bool(text.strip()),
@@ -164,12 +185,19 @@ class GroqTextGenerator:
 class HuggingFaceTextGenerator:
     """Hugging Face Inference Providers fallback with structured-output support."""
 
-    def __init__(self, settings: Settings, structured_output: bool = False) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        structured_output: bool = False,
+        model_name: str | None = None,
+        max_completion_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
         self._token = settings.hf_token
-        self._model = settings.hf_model
+        self._model = model_name or settings.hf_model
         self._provider = settings.hf_provider
-        self._max_tokens = settings.groq_max_completion_tokens
-        self._timeout_seconds = settings.groq_timeout_seconds
+        self._max_tokens = max_completion_tokens or settings.hf_max_completion_tokens
+        self._timeout_seconds = timeout_seconds or settings.hf_timeout_seconds
         self._structured_output = structured_output
         self._logger = get_logger()
 
@@ -182,7 +210,7 @@ class HuggingFaceTextGenerator:
             )
             raise QuestionnaireProviderUnavailable("Hugging Face is not configured")
 
-        def request() -> str:
+        def request() -> tuple[str, int | None, int | None]:
             from huggingface_hub import InferenceClient
 
             response_format = {"type": "json_object"} if self._structured_output else None
@@ -196,16 +224,26 @@ class HuggingFaceTextGenerator:
                 max_tokens=self._max_tokens,
                 response_format=response_format,
             )
-            return response.choices[0].message.content or ""
+            usage = getattr(response, "usage", None)
+            return (
+                response.choices[0].message.content or "",
+                getattr(usage, "prompt_tokens", None),
+                getattr(usage, "completion_tokens", None),
+            )
 
         try:
-            text = await asyncio.wait_for(asyncio.to_thread(request), timeout=self._timeout_seconds + 5)
+            text, input_tokens, output_tokens = await asyncio.wait_for(
+                asyncio.to_thread(request), timeout=self._timeout_seconds + 5
+            )
         except Exception as error:
             self._logger.warning("llm_generation_attempt_failed", provider="huggingface", error_type=type(error).__name__)
             raise QuestionnaireProviderUnavailable("Hugging Face generation failed") from error
         if not text.strip():
             raise QuestionnaireProviderUnavailable("Hugging Face returned no text")
-        return GeneratedText(text=text.strip(), provider="huggingface", model=self._model)
+        return GeneratedText(
+            text=text.strip(), provider="huggingface", model=self._model,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+        )
 
 
 class FallbackTextGenerator:

@@ -1,8 +1,8 @@
-"""Datum Engine FastAPI application."""
+"""Datum Engine FastAPI application and lifecycle wiring."""
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from src.api.router import create_api_router
 from src.api.demo import router as demo_router
@@ -20,7 +20,7 @@ from src.chatter_ai.dependencies import create_chatter_ai_container
 def create_application(settings: Settings | None = None) -> FastAPI:
     """Create the HTTP application without starting workers or model providers."""
     settings = settings or get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.log_format)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -31,6 +31,8 @@ def create_application(settings: Settings | None = None) -> FastAPI:
         await application.state.engine_container.queue.stop()
         await application.state.chatter_ai_container.queue.stop()
         await application.state.questionnaire_container.queue.stop()
+        await application.state.database_runtime.dispose()
+        await application.state.engine_container.database.dispose()
 
     application = FastAPI(
         title="Datum Engine",
@@ -43,12 +45,17 @@ def create_application(settings: Settings | None = None) -> FastAPI:
     application.state.questionnaire_container = create_questionnaire_container(settings)
     application.state.engine_container = create_engine_container(settings)
     application.state.chatter_ai_container = create_chatter_ai_container(settings)
+    application.state.database_runtime = application.state.chatter_ai_container.database
     register_exception_handlers(application)
 
     @application.get("/health", include_in_schema=False)
     async def health_check() -> dict[str, str]:
-        """Lightweight liveness endpoint that never waits for a worker or provider."""
-        return {"status": "ok"}
+        """Confirm API liveness and the durable Neon database connection."""
+        try:
+            await application.state.database_runtime.ping()
+        except Exception as error:
+            raise HTTPException(status_code=503, detail="database_unavailable") from error
+        return {"status": "ok", "database": "ok"}
 
     application.include_router(create_api_router())
     application.include_router(demo_router)

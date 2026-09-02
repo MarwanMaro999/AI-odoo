@@ -11,6 +11,8 @@ class GeneratedText:
     text: str
     provider: str
     model: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class TextGenerator(Protocol):
